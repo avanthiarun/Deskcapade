@@ -1,6 +1,8 @@
 import "./styles.css";
 import { mountCapture } from "./pages/capture";
 import { mountChallenge } from "./pages/challenge";
+import { mountCredits } from "./pages/credits";
+import { mountHow } from "./pages/how";
 import { mountDesktop } from "./pages/desktop";
 import { mountHome } from "./pages/home";
 import { mountPhone } from "./pages/phone";
@@ -18,6 +20,14 @@ function route(): void {
   // /capture and /desktop are Story's live-camera pages; /phone is what the QR code opens on the phone.
   if (path === "/story") {
     dispose = mountStory(app);
+    return;
+  }
+  if (path === "/how-to-play") {
+    dispose = mountHow(app);
+    return;
+  }
+  if (path === "/credits") {
+    dispose = mountCredits(app);
     return;
   }
   if (path === "/challenge") {
@@ -51,6 +61,7 @@ document.addEventListener("click", (ev) => {
   if (url.origin !== window.location.origin) return;
   ev.preventDefault();
   history.pushState({}, "", url.pathname);
+  window.scrollTo(0, 0);
   route();
 });
 

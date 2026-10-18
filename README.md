@@ -23,6 +23,8 @@ The console prints **MOCK** or **LIVE** mode. Mock is used when `USE_MOCK=true`,
 
 Paste a real key into `.env` as `PERCEPTRON_API_KEY` for live detection. Never commit `.env`.
 
+**Challenge course designer (optional, free):** add `GEMINI_API_KEY` from https://aistudio.google.com/apikey to `.env` (model: `GEMINI_MODEL`, default `gemini-flash-latest`). Gemini then plans each Challenge course from your desk photo. Without a key, the game designs courses itself.
+
 ## Phone access (Milestone 1)
 
 The phone **only talks to Vite**. Vite proxies `/api` to the backend. Camera access requires **HTTPS**.

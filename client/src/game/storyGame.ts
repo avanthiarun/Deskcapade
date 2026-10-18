@@ -2,14 +2,22 @@ import type { LiveObject, LiveSpriteLayer } from "../lib/liveSprites";
 import type { GameObject } from "./level";
 import { Platformer } from "./platformer";
 
-const toGame = (o: LiveObject): GameObject => ({ id: `o${o.id}`, label: o.label, templateId: o.templateId, box: o.box });
+const toGame = (o: LiveObject): GameObject => ({
+  id: `o${o.id}`,
+  label: o.label,
+  templateId: o.templateId,
+  box: o.box,
+  colors: o.colors,
+  ...(o.sprite ? { sprite: o.sprite } : {}),
+});
 
 /**
  * The garden platformer on top of Story's live video (both the laptop- and phone-camera pages).
  * Per animation frame, after `layer.draw(ctx)`: `story.frame(ctx)`.
  */
 export class StoryGame {
-  private readonly game = new Platformer({ mode: "story", seed: Date.now() % 100000 });
+  // no clouds in Story: the world is just your desk pieces
+  private readonly game = new Platformer({ mode: "story", seed: Date.now() % 100000, clouds: false });
   private detachInput: (() => void) | null = null;
   private enabled = false;
 
@@ -25,13 +33,23 @@ export class StoryGame {
     this.enabled = on;
     this.detachInput?.();
     this.detachInput = on ? this.game.attachInput() : null;
-    // desk objects are drawn as their garden pieces (vines, pools, mushrooms) while the game is on
+    // while the game is on, desk objects are drawn as their animated garden pieces
     this.layer.objectArt = on
       ? (ctx, obj, rect) => {
           this.game.setSize(ctx.canvas.width, ctx.canvas.height);
-          return this.game.drawObjectArt(ctx, toGame(obj), rect);
+          this.game.drawObjectArt(ctx, toGame(obj), rect);
+          return true;
         }
       : null;
+  }
+
+  /** What the page's top bar shows (seeds, blooms). */
+  stats(): ReturnType<Platformer["stats"]> {
+    return this.game.stats();
+  }
+
+  setPaused(paused: boolean): void {
+    this.game.setPaused(paused);
   }
 
   frame(ctx: CanvasRenderingContext2D, now = performance.now()): void {

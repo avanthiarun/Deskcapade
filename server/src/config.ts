@@ -19,6 +19,8 @@ const envSchema = z.object({
     .transform((v) => v.trim().toLowerCase() === "true"),
   DETECT_CATEGORIES: z.string().optional().default(""),
   SCAN_MAX_WIDTH: z.coerce.number().positive().default(960),
+  GEMINI_API_KEY: z.string().optional().default(""),
+  GEMINI_MODEL: z.string().optional().default("gemini-flash-latest"),
 });
 
 const parsed = envSchema.parse(process.env);
@@ -43,6 +45,9 @@ export const config = {
   mock,
   detectCategories: parseCategories(parsed.DETECT_CATEGORIES),
   scanMaxWidth: parsed.SCAN_MAX_WIDTH,
+  /** Challenge course designer (free Gemini API). Empty = the game designs courses itself. */
+  geminiApiKey: parsed.GEMINI_API_KEY.trim(),
+  geminiModel: parsed.GEMINI_MODEL.trim() || "gemini-flash-latest",
 };
 
 export function logStartupMode(): void {

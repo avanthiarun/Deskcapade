@@ -1,8 +1,9 @@
 import type { Box, DetectedObject } from "@deskcapade/shared";
 import { pickDeskObjects } from "./deskFilter";
-import { drawSpriteShadow, makeDeskSprite, type DeskSprite } from "./deskSprites";
+import { drawSpriteShadow, makeDeskSprite, type DeskSprite, type SpriteColors } from "./deskSprites";
 import { drawPixelBackdropStrip } from "./pixelBackdrop";
 import { findSpriteTemplate } from "./spriteDictionary";
+import { objectKind } from "../game/materials";
 
 /* ------------------------------------------------------------------
    Story mode's live version of the Challenge effect: every desk object in the
@@ -155,12 +156,19 @@ export class CameraMotion {
 
 /* ---------- the sprite layer ---------- */
 
-const MISS_LIMIT = 1; // a sprite leaves as soon as a scan no longer finds its object
+// Detection is noisy (an object can be missed or described differently from one scan to the next),
+// so an object only leaves after several missed scans AND a while unseen: no flickering.
+// With overlapping scans a fresh result lands every couple of seconds, so a removed object goes
+// within ~3 s, while a single noisy miss never makes one blink out.
+const MISS_LIMIT = 2;
+const KEEP_MS = 1500;
 const GLIDE_MS = 140; // how quickly a sprite settles onto its newest detected spot
 const POP_MS = 450;
 const SPARKLE_MS = 650;
 const LEAVE_MS = 280;
 const SPARKLE_COLORS = ["#fff7e6", "#ffd84a", "#ff86a8"];
+/** A sprite is redrawn from the camera when its object's box changes size by more than this factor. */
+const RESPRITE_RATIO = 1.35;
 
 /* pixel background: pinned to the real world, revealed tile by tile */
 const STRIP_SCREENS = 4; // the backdrop repeats every this many screen-widths
@@ -178,6 +186,8 @@ type LiveTrack = {
   target: Box;
   shown: Box;
   misses: number;
+  /** When a scan last found it. */
+  lastSeenAt: number;
   sprite: DeskSprite | null;
   bornAt: number;
   /** Set when the object is gone; the sprite shrinks away from this moment. */
@@ -197,29 +207,24 @@ const iou = (a: Box, b: Box): number => {
 const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
 
 /** A desk object as it is on screen right now (canvas pixels, full size, not mid-animation). */
-export type LiveObject = { id: number; label: string; templateId: string | null; box: Box };
+export type LiveObject = {
+  id: number;
+  label: string;
+  templateId: string | null;
+  box: Box;
+  colors: SpriteColors | null;
+  sprite: HTMLCanvasElement | null;
+};
 
 /**
- * Optional replacement art for an object (the platformer turns cans into vines, mugs into pools...).
- * Called with the rect the sprite would fill; return true if it drew, false to draw the normal sprite.
+ * Optional replacement art for an object (the platformer draws its animated garden piece).
+ * Called with the rect the sprite would fill; return true if it drew, false to draw the sprite.
  */
 export type ObjectArtHook = (
   ctx: CanvasRenderingContext2D,
   obj: LiveObject,
   rect: { x: number; y: number; w: number; h: number },
 ) => boolean;
-
-/** `b` grown by `frac` of its size on every side, kept inside the picture. */
-const padBox = (b: Box, frac: number, maxW: number, maxH: number): Box => {
-  const x = Math.max(0, b.x - b.w * frac);
-  const y = Math.max(0, b.y - b.h * frac);
-  return {
-    x,
-    y,
-    w: Math.min(maxW, b.x + b.w * (1 + frac)) - x,
-    h: Math.min(maxH, b.y + b.h * (1 + frac)) - y,
-  };
-};
 
 const easeOutBack = (p: number): number => {
   const c = 1.9;
@@ -244,7 +249,7 @@ export class LiveSpriteLayer {
   readonly motion = new CameraMotion();
   /** Turn the pixel background on by itself the first time desk objects are found (like Challenge). */
   autoPixelWorld = true;
-  /** Set to draw some objects as something else (see ObjectArtHook). */
+  /** Set to draw objects as something else (see ObjectArtHook). */
   objectArt: ObjectArtHook | null = null;
   private tracks: LiveTrack[] = [];
   private nextId = 1;
@@ -287,8 +292,15 @@ export class LiveSpriteLayer {
         id: t.id,
         label: t.label,
         templateId: t.templateId,
+        colors: t.sprite?.colors ?? null,
+        sprite: t.sprite?.canvas ?? null,
         box: { x: (t.shown.x + pan.x) * W, y: (t.shown.y + pan.y) * H, w: t.shown.w * W, h: t.shown.h * H },
       }));
+  }
+
+  /** Redraw every object's sprite (e.g. after unlisted objects were matched to a new shape). */
+  refreshSprites(): void {
+    for (const t of this.tracks) t.sprite = null;
   }
 
   labels(): string[] {
@@ -332,7 +344,7 @@ export class LiveSpriteLayer {
   ): void {
     if (imageSize.w <= 0 || imageSize.h <= 0 || photo.width === 0) return;
     // same desk-only filter as Challenge (background, far away, blurry)
-    const { kept } = pickDeskObjects(photo, objects, imageSize);
+    const { kept } = pickDeskObjects(photo, objects, imageSize, { live: true });
     const panNow = this.motion.current;
     const matched = new Set<LiveTrack>();
 
@@ -345,16 +357,17 @@ export class LiveSpriteLayer {
         h: c.box.h / photo.height,
       };
       const templateId = findSpriteTemplate(c.label)?.id ?? null;
+      // identity = what it becomes (labels get reworded every scan: "mug", "white ceramic mug on desk"...)
+      const kind = objectKind(c.label);
 
       let best: LiveTrack | null = null;
       let bestScore = 0;
       for (const t of this.tracks) {
         if (matched.has(t) || t.leftAt !== null) continue;
         const overlap = iou(t.target, world);
-        const same = t.templateId !== null && t.templateId === templateId;
-        const sameLabel = t.label.toLowerCase() === c.label.toLowerCase();
-        if (overlap < 0.15 || (!same && !sameLabel && overlap < 0.5)) continue;
-        const score = overlap + (same || sameLabel ? 0.3 : 0);
+        const same = kind !== "platform" && kind === objectKind(t.label);
+        if (overlap < 0.1 || (!same && overlap < 0.35)) continue;
+        const score = overlap + (same ? 0.3 : 0);
         if (score > bestScore) {
           best = t;
           bestScore = score;
@@ -362,11 +375,19 @@ export class LiveSpriteLayer {
       }
 
       if (best) {
+        // grew or shrank a lot (moved closer / turned): redraw its sprite from the new view
+        const drawn = best.sprite?.box;
+        if (drawn) {
+          const w = world.w * photo.width;
+          const h = world.h * photo.height;
+          if (Math.max(w / drawn.w, drawn.w / w, h / drawn.h, drawn.h / h) > RESPRITE_RATIO) best.sprite = null;
+        }
         best.target = world;
         best.misses = 0;
+        best.lastSeenAt = now;
         matched.add(best);
-        if (templateId !== null && templateId !== best.templateId) {
-          // it turned out to be something else: redraw its sprite
+        if (kind !== "platform" && kind !== objectKind(best.label)) {
+          // a clearer look shows it's something else: redraw it (a vaguer label never undoes a known one)
           best.label = c.label;
           best.templateId = templateId;
           best.sprite = null;
@@ -379,6 +400,7 @@ export class LiveSpriteLayer {
           target: world,
           shown: { ...world },
           misses: 0,
+          lastSeenAt: now,
           sprite: null,
           bornAt: now,
           leftAt: null,
@@ -391,7 +413,7 @@ export class LiveSpriteLayer {
     for (const t of this.tracks) {
       if (matched.has(t) || t.leftAt !== null) continue;
       t.misses += 1;
-      if (t.misses >= MISS_LIMIT) t.leftAt = now;
+      if (t.misses >= MISS_LIMIT && now - t.lastSeenAt > KEEP_MS) t.leftAt = now;
     }
 
     if (this.autoPixelWorld && !this.autoDone && kept.length > 0) this.setPixelWorld(true, now);
@@ -406,9 +428,7 @@ export class LiveSpriteLayer {
         h: t.target.h * photo.height,
       };
       if (box.w < 2 || box.h < 2) continue;
-      // Detection boxes hug the object, so the color sampler would mistake the object's own edge
-      // for background. Give dictionary objects a margin of real background around them.
-      t.sprite = makeDeskSprite(t.label, photo, t.templateId ? padBox(box, 0.12, photo.width, photo.height) : box);
+      t.sprite = makeDeskSprite(t.label, photo, box);
     }
   }
 
@@ -506,8 +526,8 @@ export class LiveSpriteLayer {
       const y = by - pad + (bh + pad * 2 - h); // grows up from the bottom of its box
       const zoom = Math.max(1, Math.min(w / t.sprite.canvas.width, h / t.sprite.canvas.height));
 
-      ctx.globalAlpha = t.misses > 0 ? 0.75 : 1; // a little see-through while it might be leaving
-      const obj: LiveObject = { id: t.id, label: t.label, templateId: t.templateId, box: { x: bx, y: by, w: bw, h: bh } };
+      ctx.globalAlpha = t.misses >= 2 ? 0.8 : 1; // a little see-through while it might be leaving
+      const obj: LiveObject = { id: t.id, label: t.label, templateId: t.templateId, colors: t.sprite.colors, sprite: t.sprite.canvas, box: { x: bx, y: by, w: bw, h: bh } };
       const rect = { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
       if (!this.objectArt?.(ctx, obj, rect)) {
         if (this.pixelWorld) drawSpriteShadow(ctx, { x, y, w, h, zoom });
@@ -531,11 +551,4 @@ export class LiveSpriteLayer {
     }
     ctx.restore();
   }
-}
-
-/** Fill the "Detected: ..." text for the live sprite layer; hidden when nothing is shown. */
-export function renderLiveDetectedText(el: HTMLElement, layer: LiveSpriteLayer): void {
-  const labels = layer.labels();
-  el.textContent = labels.length > 0 ? `Detected: ${labels.join(" • ")}` : "";
-  el.hidden = labels.length === 0;
 }

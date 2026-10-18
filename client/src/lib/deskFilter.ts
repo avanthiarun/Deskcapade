@@ -1,10 +1,11 @@
 import type { Box, DetectedObject } from "@deskcapade/shared";
 import { findSpriteTemplate } from "./spriteDictionary";
+import { listedKind } from "../game/materials";
 
 /* ------------------------------------------------------------------
    Desk objects only: decide which detections are things ON the desk (foreground)
-   and which are background (wall, furniture, people) or far away, then blur
-   everything that isn't a kept desk object.
+   and which are background (wall, furniture, people, anything on the floor), far away,
+   or cut off by the edge of the picture, then blur everything that isn't a kept desk object.
 
    Three signals, all measured on the photo in the browser:
    - sharpness inside the box (in-focus things have crisp edges; far / out-of-focus things don't),
@@ -35,13 +36,28 @@ const BACKGROUND_WORDS = [
   "person", "people", "man", "woman", "boy", "girl", "child", "kid", "face", "head", "hair",
   "hand", "arm", "finger", "fingers", "body", "shirt", "poster", "painting", "rug", "carpet",
 ];
+/**
+ * The game happens on the desk: the desk is the lowest level, so anything on the floor is skipped.
+ * (Matched anywhere in the label: "trash can on the floor" is a floor thing, not a can.)
+ */
+const FLOOR_PATTERN =
+  /(?:floor|flooring|floorboards?|rugs?|carpets?|trash ?cans?|wastebaskets?|waste baskets?|garbage cans?|bins?|shoes?|slippers?|sneakers?|boots?|socks?|baseboards?|on the ground|chair legs?|table legs?|desk legs?)/i;
+/** Labels for the desk itself (to find where its top is). */
+const DESK_WORDS = ["desk", "table", "tabletop", "countertop", "workspace", "workbench"];
+/** A box this close to the picture's edge (fraction of its size) is cut off: only part of it is in view. */
+const EDGE_MARGIN = 0.012;
+/** Live video: boxes wobble from frame to frame, so only boxes right at the edge count as cut off. */
+const LIVE_EDGE_MARGIN = 0.004;
+/** A listed object (can, mug...) may fill this much of the picture: a close-up side view of a tall thing. */
+const MAX_LISTED_AREA_FRACTION = 0.65;
+
 /** Background labels whose box hides whatever is inside it (a person, a chair...). */
 const COVERING_WORDS = [
   "person", "people", "man", "woman", "boy", "girl", "child", "kid", "face", "body", "shirt",
   "chair", "sofa", "couch", "bed", "cabinet", "shelf", "bookcase",
 ];
 
-export type SkipReason = "background" | "far" | "blurry";
+export type SkipReason = "background" | "far" | "blurry" | "floor" | "cut off";
 
 export type DeskCandidate = {
   object: DetectedObject;
@@ -171,6 +187,10 @@ export function pickDeskObjects(
   photo: HTMLCanvasElement,
   objects: readonly DetectedObject[],
   imageSize: { w: number; h: number },
+  opts: {
+    /** Live video (Story): gentler, so objects don't flicker in and out from scan to scan. */
+    live?: boolean;
+  } = {},
 ): DeskFilterResult {
   const kept: DeskCandidate[] = [];
   const skipped: SkippedCandidate[] = [];
@@ -200,16 +220,31 @@ export function pickDeskObjects(
     .filter((a) => isWord(a.candidate.label, COVERING_WORDS) && findSpriteTemplate(a.candidate.label) === null)
     .map((a) => a.candidate.box);
 
-  // 1) what it is, and how big it is
+  // the desk's top surface, if it was detected: everything entirely below the desk is on the floor
+  const desk = all
+    .map((a) => a.candidate)
+    .filter((c) => isWord(c.label, DESK_WORDS))
+    .sort((a, b) => b.box.w * b.box.h - a.box.w * a.box.h)[0];
+  const margin = opts.live ? LIVE_EDGE_MARGIN : EDGE_MARGIN;
+  const mx = photo.width * margin;
+  const my = photo.height * margin;
+  const cutOff = (b: Box): boolean => b.x <= mx || b.y <= my || b.x + b.w >= photo.width - mx || b.y + b.h >= photo.height - my;
+
+  // 1) what it is, where it is, and how big it is
   const remaining: DeskCandidate[] = [];
   for (const { candidate, std } of all) {
     const known = findSpriteTemplate(candidate.label) !== null;
     const covered = coverBoxes.some((b) => b !== candidate.box && coveredBy(candidate.box, b) > 0.8);
-    if (isBackgroundLabel(candidate.label) || (!known && (std < FLAT_STD || covered))) {
+    const belowDesk = desk !== undefined && candidate !== desk && candidate.box.y >= desk.box.y + desk.box.h;
+    if (FLOOR_PATTERN.test(candidate.label) || belowDesk) {
+      skipped.push({ ...candidate, reason: "floor" });
+    } else if (cutOff(candidate.box)) {
+      skipped.push({ ...candidate, reason: "cut off" });
+    } else if (isBackgroundLabel(candidate.label) || (!known && (std < FLAT_STD || covered))) {
       skipped.push({ ...candidate, reason: "background" });
     } else if (candidate.areaFraction < MIN_AREA_FRACTION) {
       skipped.push({ ...candidate, reason: "far" });
-    } else if (candidate.areaFraction >= MAX_AREA_FRACTION) {
+    } else if (candidate.areaFraction >= (listedKind(candidate.label) ? MAX_LISTED_AREA_FRACTION : MAX_AREA_FRACTION)) {
       skipped.push({ ...candidate, reason: "background" });
     } else {
       remaining.push(candidate);
@@ -224,7 +259,9 @@ export function pickDeskObjects(
     const lowerScore = clamp01((c.box.y + c.box.h) / photo.height); // nearer things sit lower in the frame
     c.score = 0.6 * relSharp + 0.25 * sizeScore + 0.15 * lowerScore;
 
-    if (relSharp < MIN_RELATIVE_SHARPNESS) skipped.push({ ...c, reason: "blurry" });
+    // live video: focus and sharpness jump around from frame to frame, so they don't decide anything
+    if (opts.live) kept.push(c);
+    else if (relSharp < MIN_RELATIVE_SHARPNESS) skipped.push({ ...c, reason: "blurry" });
     else if (c.score < MIN_SCORE) skipped.push({ ...c, reason: c.areaFraction < 0.02 ? "far" : "blurry" });
     else kept.push(c);
   }

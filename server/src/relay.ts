@@ -2,6 +2,8 @@ import type { Server as HttpServer } from "node:http";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import type {
   ErrorMessage,
+  PhoneToServer,
+  SnapMessage,
   ScanResultMessage,
   ServerToPhone,
   StatusToDesktop,
@@ -17,8 +19,10 @@ const MAX_BUFFERED_BYTES = 128 * 1024;
 const HEARTBEAT_MS = 20_000;
 const FRAME_HEADER_BYTES = 4;
 
-// Detection always runs automatically: one scan every 250 ms while a phone and a laptop are connected.
-const SCAN_INTERVAL_MS = 250;
+// Detection runs automatically while a phone and a Story page are connected. Each scan takes a few
+// seconds, so they overlap: a new one starts every SCAN_START_EVERY_MS, at most MAX_SCANS_IN_FLIGHT at once.
+const SCAN_START_EVERY_MS = 1200; // 50 scans a minute
+const MAX_SCANS_IN_FLIGHT = 5; // each scan takes 4-6 s, so ~5 overlap at this pace
 // After a failed scan (rate limit, network), wait longer before trying again.
 const ERROR_BACKOFF_MS = 2000;
 
@@ -41,8 +45,8 @@ function toBuffer(data: RawData): Buffer {
  *   bytes 2-3: height (uint16, little-endian)
  *   bytes 4+ : JPEG image
  *
- * Phone frames are relayed to desktops. The server scans the latest frame every 250 ms
- * on its own; desktops only watch.
+ * Phone frames are relayed to desktops. The server scans the latest frame on its own (several
+ * overlapping scans) for Story pages; desktops only watch.
  */
 export function attachRelay(server: HttpServer): void {
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD_BYTES });
@@ -54,7 +58,10 @@ export function attachRelay(server: HttpServer): void {
 
   let latestFrame: LatestFrame | null = null;
   let lastScannedFrame: LatestFrame | null = null;
-  let scanning = false;
+  let inFlight = 0;
+  let scanSeq = 0;
+  let newestSent = 0;
+  let backoffUntil = 0;
 
   let loopRunning = false;
   let loopGen = 0;
@@ -80,7 +87,8 @@ export function attachRelay(server: HttpServer): void {
       autoscan: true, // always on
       mock: config.mock,
     };
-    const toPhone: ServerToPhone = { type: "status", desktopConnected: desktops.size > 0 };
+    // desktops that don't scan the stream are Challenge pages: they take photos, so the phone can snap
+    const toPhone: ServerToPhone = { type: "status", desktopConnected: desktops.size > 0, canSnap: desktops.size > scanners.size };
     for (const ws of desktops) sendJson(ws, toDesktop);
     for (const ws of phones) sendJson(ws, toPhone);
   }
@@ -96,38 +104,40 @@ export function attachRelay(server: HttpServer): void {
   // ---------- scanning ----------
 
   /**
-   * Scan the most recent phone frame (skips if there is no new frame since the last scan).
-   * Returns false only if the scan itself failed.
+   * Start a scan of the most recent phone frame (skipped if there's no new frame, too many scans
+   * are already running, or we're backing off after an error). Scans overlap: each takes several
+   * seconds, so starting one every SCAN_START_EVERY_MS keeps fresh results coming. A result
+   * older than one already sent is dropped.
    */
-  async function doScan(): Promise<boolean> {
-    if (scanning) return true;
-    if (phones.size === 0 || !latestFrame || latestFrame === lastScannedFrame) return true;
-
-    scanning = true;
-    try {
-      const frame = latestFrame;
-      lastScannedFrame = frame;
-      const image = `data:image/jpeg;base64,${frame.buf.subarray(FRAME_HEADER_BYTES).toString("base64")}`;
-      const result = await runScan(image, frame.width, frame.height);
-      broadcastDesktops({ type: "scanResult", ...result } satisfies ScanResultMessage);
-      return true;
-    } catch (err) {
-      sendError(err);
-      return false;
-    } finally {
-      scanning = false;
-    }
+  function startScan(): void {
+    if (inFlight >= MAX_SCANS_IN_FLIGHT || Date.now() < backoffUntil) return;
+    if (phones.size === 0 || !latestFrame || latestFrame === lastScannedFrame) return;
+    const frame = latestFrame;
+    lastScannedFrame = frame;
+    const seq = ++scanSeq;
+    inFlight++;
+    const image = `data:image/jpeg;base64,${frame.buf.subarray(FRAME_HEADER_BYTES).toString("base64")}`;
+    runScan(image, frame.width, frame.height, { fast: true })
+      .then((result) => {
+        if (seq < newestSent) return; // a newer scan already answered
+        newestSent = seq;
+        broadcastDesktops({ type: "scanResult", ...result } satisfies ScanResultMessage);
+      })
+      .catch((err: unknown) => {
+        sendError(err);
+        backoffUntil = Date.now() + ERROR_BACKOFF_MS;
+      })
+      .finally(() => {
+        inFlight--;
+      });
   }
 
   const shouldScan = (): boolean => scanners.size > 0 && phones.size > 0;
 
-  async function tick(gen: number): Promise<void> {
+  function tick(gen: number): void {
     if (gen !== loopGen) return;
-    const started = Date.now();
-    const ok = await doScan();
-    if (gen !== loopGen) return; // loop was stopped (and maybe restarted) meanwhile
-    const wait = ok ? SCAN_INTERVAL_MS : ERROR_BACKOFF_MS;
-    loopTimer = setTimeout(() => void tick(gen), Math.max(0, wait - (Date.now() - started)));
+    startScan();
+    loopTimer = setTimeout(() => tick(gen), SCAN_START_EVERY_MS);
   }
 
   function stopScanLoop(): void {
@@ -146,7 +156,7 @@ export function attachRelay(server: HttpServer): void {
     if (loopRunning) return;
     loopRunning = true;
     loopGen += 1;
-    void tick(loopGen);
+    tick(loopGen);
   }
 
   // ---------- connections ----------
@@ -164,7 +174,24 @@ export function attachRelay(server: HttpServer): void {
     if (role === "phone") {
       phones.add(ws);
       ws.on("message", (data: RawData, isBinary: boolean) => {
-        if (!isBinary) return;
+        if (!isBinary) {
+          // the phone's Snap button: pass it to the Challenge pages (the ones not scanning)
+          try {
+            const msg = JSON.parse(toBuffer(data).toString("utf8")) as PhoneToServer;
+            if (msg.type === "snap") {
+              let sent = false;
+              for (const desk of desktops) {
+                if (scanners.has(desk)) continue;
+                sendJson(desk, { type: "snap" } satisfies SnapMessage);
+                sent = true;
+              }
+              if (sent) sendJson(ws, { type: "snapped" } satisfies ServerToPhone);
+            }
+          } catch {
+            /* ignore malformed messages */
+          }
+          return;
+        }
         const buf = toBuffer(data);
         if (buf.length <= FRAME_HEADER_BYTES) return;
         const width = buf.readUInt16LE(0);

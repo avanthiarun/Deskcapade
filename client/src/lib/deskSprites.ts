@@ -2,12 +2,15 @@ import type { Box } from "@deskcapade/shared";
 import { blurBackground } from "./deskFilter";
 import { drawPixelBackdrop } from "./pixelBackdrop";
 import { FIXED_COLORS, OUTLINE_COLOR, findSpriteTemplate, type SpriteTemplate } from "./spriteDictionary";
-import { pixelateCrop } from "./sprites";
+import { objectKind } from "../game/materials";
+import { drawPiece, tonesOf } from "../game/pieces";
+import { artPixelSize } from "./artPixel";
 
 /* ------------------------------------------------------------------
-   Turn a detected desk object into a cute sprite:
-   1) dictionary hit  -> premade template, recolored with the object's real color
-   2) no dictionary hit -> the pixelization algorithm on the photo crop (fallback only)
+   Turn a detected desk object into a sprite: a still picture of the garden-castle piece it
+   becomes (game/pieces.ts), at the object's real size and in the object's real color, so a
+   gray can is a gray stone tower. The game draws the same pieces animated. Premade dictionary
+   templates remain available (renderSpriteTemplate) for pictures with no photo behind them.
    Then draw each sprite over its whole box (same size as the real object).
    ------------------------------------------------------------------ */
 
@@ -21,9 +24,10 @@ export type DeskSprite = {
   box: Box;
   /** The sprite at 1 canvas pixel per art pixel (scale it up with nearest-neighbor). */
   canvas: HTMLCanvasElement;
-  source: "dictionary" | "pixelated";
-  /** Template id when `source` is "dictionary". */
+  /** What the sprite dictionary says the object is (null if it doesn't know). */
   templateId: string | null;
+  /** The object's own colors, for decorations drawn on top of it. */
+  colors: SpriteColors;
 };
 
 /* ---------- color helpers ---------- */
@@ -220,17 +224,27 @@ export function renderSpriteTemplate(template: SpriteTemplate, colors: SpriteCol
   return out;
 }
 
+/** `b` grown by `frac` of its size on every side, kept inside the picture. */
+function padBox(b: Box, frac: number, maxW: number, maxH: number): Box {
+  const x = Math.max(0, b.x - b.w * frac);
+  const y = Math.max(0, b.y - b.h * frac);
+  return { x, y, w: Math.min(maxW, b.x + b.w * (1 + frac)) - x, h: Math.min(maxH, b.y + b.h * (1 + frac)) - y };
+}
+
 /**
- * The sprite for one desk object. Dictionary objects never go through the pixelization
- * algorithm; it is only the fallback for objects the dictionary doesn't know.
+ * The sprite for one desk object: its garden piece, colored like the real object in `photo`.
+ * `pixel` = photo pixels per art pixel (defaults to the shared art-pixel size for this photo).
  */
-export function makeDeskSprite(label: string, photo: HTMLCanvasElement, box: Box): DeskSprite {
-  const template = findSpriteTemplate(label);
-  if (template) {
-    const colors = colorsFromDominant(sampleDominantColor(photo, box));
-    return { label, box, canvas: renderSpriteTemplate(template, colors), source: "dictionary", templateId: template.id };
-  }
-  return { label, box, canvas: pixelateCrop(photo, box), source: "pixelated", templateId: null };
+export function makeDeskSprite(label: string, photo: HTMLCanvasElement, box: Box, pixel = artPixelSize(photo.height)): DeskSprite {
+  // detection boxes hug the object, so give the color sampler a margin of real background
+  const colors = colorsFromDominant(sampleDominantColor(photo, padBox(box, 0.12, photo.width, photo.height)));
+  const templateId = findSpriteTemplate(label)?.id ?? null;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(4, Math.round(box.w / pixel));
+  canvas.height = Math.max(4, Math.round(box.h / pixel));
+  const ctx = canvas.getContext("2d")!;
+  drawPiece(ctx, objectKind(label), { x: 0, y: 0, w: canvas.width, h: canvas.height }, 1, 0, tonesOf(colors));
+  return { label, box, canvas, templateId, colors };
 }
 
 /** Where a sprite lands: exactly its object's box, so the sprite is the same size as the real thing. */

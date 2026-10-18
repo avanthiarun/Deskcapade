@@ -1,128 +1,56 @@
 import type { ApiError, ScanResponse } from "@deskcapade/shared";
 import { StoryGame } from "../game/storyGame";
-import { LiveSpriteLayer, renderLiveDetectedText } from "../lib/liveSprites";
+import { LiveSpriteLayer } from "../lib/liveSprites";
+import { matchInBackground, onMatched } from "../lib/matchObjects";
 import { injectGameStyles } from "../lib/gameStyles";
 import { ROUTES } from "../lib/routes";
-import { injectStoryStyles } from "../lib/storyStyles";
+import { bindStoryUi, storyLayoutHTML } from "./storyLayout";
 
-const SCAN_INTERVAL_MS = 250; // detection always runs automatically, every 250 ms
-const ERROR_BACKOFF_MS = 2000; // after a failed scan, wait longer before trying again
+// Each scan takes a few seconds, so scans overlap: a new one starts every SCAN_START_EVERY_MS
+// (at most MAX_SCANS_IN_FLIGHT at once) and results arrive every couple of seconds.
+const SCAN_START_EVERY_MS = 1200; // 50 scans a minute
+const MAX_SCANS_IN_FLIGHT = 5; // each scan takes 4-6 s, so ~5 overlap at this pace
+const ERROR_BACKOFF_MS = 2000; // after a failed scan, wait longer before starting another
 const SCAN_REQUEST_TIMEOUT_MS = 15_000;
-const SCAN_WIDTH = 800; // frames are scaled down to this width before being sent
+const SCAN_WIDTH = 512; // small frames come back faster
 const SCAN_JPEG_QUALITY = 0.7;
 
-type CameraState = "starting" | "on" | "error";
-
 /**
- * Laptop-camera page: same view as the phone-camera page (pixel sprites over the desk objects
- * in the video, "Detected: ..." text underneath, automatic scanning every 250 ms). The only difference is the video source:
- * this computer's own camera instead of the phone.
+ * Story with this computer's camera: the live video becomes the garden world (pixel pieces over
+ * the desk objects, the garden game on top). Detection runs automatically, several scans overlapping.
  */
 export function mountCapture(root: HTMLElement): () => void {
   injectGameStyles();
-  injectStoryStyles();
+  root.innerHTML = storyLayoutHTML();
+  const video = document.createElement("video");
+  video.className = "hidden-video";
+  video.autoplay = true;
+  video.muted = true;
+  video.playsInline = true;
+  root.querySelector(".gm")!.appendChild(video);
 
-  root.innerHTML = `
-    <main class="gm">
-      <div class="gm-wrap">
-        <a class="gm-back" href="${ROUTES.story}">◀ Story</a>
-        <h1 class="gm-h1">Story</h1>
-        <div class="gm-stage"><canvas id="view" width="1280" height="720"></canvas></div>
-        <div class="gm-row">
-          <span class="gm-chip" id="cameraChip"><span id="cameraText">Starting camera…</span></span>
-          <span class="gm-chip" id="countChip">0 objects</span>
-          <span class="gm-chip" id="latencyChip">– ms</span>
-          <span class="gm-chip warn" id="mockChip" hidden>MOCK</span>
-          <button class="gm-btn small ghost" id="pixelToggle" type="button" aria-pressed="false">🌄 Pixel world: Off</button>
-          <button class="gm-btn small" id="gameToggle" type="button" aria-pressed="true">🌱 Garden game: On</button>
-        </div>
-        <p class="gm-note st-controls" id="controls">← → / A D move · Space jump · ↑ ↓ climb vines &amp; ladders · ↓ drop through · R respawn. Collect the golden seeds on the branches!</p>
-
-        <p class="st-detected" id="detected" hidden aria-live="polite"></p>
-
-        <video id="video" class="hidden-video" autoplay muted playsinline></video>
-        <div class="gm-toast" id="toast" role="status" hidden></div>
-      </div>
-    </main>
-  `;
-
-  const q = <T extends HTMLElement>(sel: string): T => root.querySelector<T>(sel)!;
-  const canvas = q<HTMLCanvasElement>("#view");
+  const canvas = root.querySelector<HTMLCanvasElement>("#view")!;
   const ctx = canvas.getContext("2d")!;
-  const video = q<HTMLVideoElement>("#video");
-  const cameraChip = q<HTMLElement>("#cameraChip");
-  const cameraText = q<HTMLElement>("#cameraText");
-  const countChip = q<HTMLElement>("#countChip");
-  const latencyChip = q<HTMLElement>("#latencyChip");
-  const mockChip = q<HTMLElement>("#mockChip");
-  const detectedEl = q<HTMLElement>("#detected");
-  const toast = q<HTMLElement>("#toast");
-  const pixelToggle = q<HTMLButtonElement>("#pixelToggle");
-  const gameToggle = q<HTMLButtonElement>("#gameToggle");
-  const controlsEl = q<HTMLElement>("#controls");
-
-  // ---------- state ----------
 
   const layer = new LiveSpriteLayer();
   const story = new StoryGame(layer);
+  const ui = bindStoryUi(root, story, layer);
+  const stopMatching = onMatched(() => layer.refreshSprites());
   let lastVideoTime = -1;
-  let cameraState: CameraState = "starting";
-  let cameraError = "";
   let stream: MediaStream | null = null;
-  let latencyMs: number | null = null;
-  let toastTimer: number | undefined;
+  let lastError = "";
   let scanTimer: number | undefined;
   let stopped = false;
   let raf = 0;
 
-  // ---------- small UI helpers ----------
-
-  const showToast = (text: string): void => {
-    toast.textContent = text;
-    toast.hidden = false;
-    window.clearTimeout(toastTimer);
-    toastTimer = window.setTimeout(() => {
-      toast.hidden = true;
-    }, 5000);
-  };
-
-  const renderToggle = (): void => {
-    pixelToggle.textContent = `🌄 Pixel world: ${layer.pixelWorld ? "On" : "Off"}`;
-    pixelToggle.setAttribute("aria-pressed", String(layer.pixelWorld));
-    gameToggle.textContent = `🌱 Garden game: ${story.on ? "On" : "Off"}`;
-    gameToggle.setAttribute("aria-pressed", String(story.on));
-    controlsEl.hidden = !story.on;
-  };
-
-
-  const renderUi = (): void => {
-    if (cameraState === "on") {
-      cameraText.textContent = "Laptop camera on";
-      cameraChip.className = "gm-chip on";
-    } else if (cameraState === "error") {
-      cameraText.textContent = "Camera unavailable";
-      cameraChip.className = "gm-chip warn";
-    } else {
-      cameraText.textContent = "Starting camera…";
-      cameraChip.className = "gm-chip warn";
-    }
-
-    const count = layer.count;
-    countChip.textContent = `${count} object${count === 1 ? "" : "s"}`;
-    countChip.className = count > 0 ? "gm-chip on" : "gm-chip";
-    latencyChip.textContent = latencyMs === null ? "– ms" : `${latencyMs} ms`;
-    renderLiveDetectedText(detectedEl, layer);
-    renderToggle();
-  };
+  ui.showMessage(`<h2>Starting the camera…</h2><p>Allow camera access when your browser asks.</p>`);
 
   // ---------- camera ----------
 
   const startCamera = async (): Promise<void> => {
     if (!navigator.mediaDevices?.getUserMedia) {
-      cameraState = "error";
-      cameraError = "This browser can't open the camera on this page.";
-      showToast(cameraError);
-      renderUi();
+      ui.showMessage(`<h2>No camera here</h2><p>This browser can't open the camera on this page.</p>
+        <a class="gm-btn cream small" href="${ROUTES.story}">← Choose another camera</a>`);
       return;
     }
     try {
@@ -137,17 +65,13 @@ export function mountCapture(root: HTMLElement): () => void {
       stream = media;
       video.srcObject = media;
       await video.play().catch(() => undefined);
-      cameraState = "on";
+      ui.showMessage(null);
     } catch (err) {
-      const name = err instanceof DOMException ? err.name : "";
-      cameraState = "error";
-      cameraError =
-        name === "NotAllowedError"
-          ? "Camera permission was blocked. Allow camera access, then reload."
-          : "Could not start the camera. Close other apps using it and reload.";
-      showToast(cameraError);
+      const blocked = err instanceof DOMException && err.name === "NotAllowedError";
+      ui.showMessage(`<h2>${blocked ? "Camera blocked" : "Camera busy"}</h2>
+        <p>${blocked ? "Allow camera access for this site, then reload the page." : "Close other apps using the camera, then reload the page."}</p>
+        <a class="gm-btn cream small" href="${ROUTES.story}">← Choose another camera</a>`);
     }
-    renderUi();
   };
 
   // ---------- drawing ----------
@@ -161,26 +85,30 @@ export function mountCapture(root: HTMLElement): () => void {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       const fresh = video.currentTime !== lastVideoTime;
       lastVideoTime = video.currentTime;
-      if (layer.frame(ctx, fresh)) renderUi();
+      layer.frame(ctx, fresh);
     } else {
-      ctx.fillStyle = "#120f20";
+      ctx.fillStyle = "#1d140b";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
-
     layer.draw(ctx);
     story.frame(ctx);
+    ui.refresh();
     if (!stopped) raf = requestAnimationFrame(draw);
   };
 
-  // ---------- automatic scanning (every 250 ms, one at a time) ----------
+  // ---------- automatic scanning (overlapping, fast category scans) ----------
 
   const scanCanvas = document.createElement("canvas");
   const scanCtx = scanCanvas.getContext("2d")!;
+  let inFlight = 0;
+  let scanSeq = 0;
+  let newestApplied = 0;
+  let backoffUntil = 0;
 
-  /** Send the current camera frame to the server. Returns false only if the scan failed. */
-  const scanOnce = async (): Promise<boolean> => {
-    if (video.readyState < 2 || video.videoWidth === 0) return true; // camera not ready yet
-
+  /** Send the current camera frame to the server; a slower answer than a newer one is dropped. */
+  const startScan = async (): Promise<void> => {
+    if (inFlight >= MAX_SCANS_IN_FLIGHT || performance.now() < backoffUntil) return;
+    if (video.readyState < 2 || video.videoWidth === 0) return; // camera not ready yet
     const scale = Math.min(1, SCAN_WIDTH / video.videoWidth);
     const width = Math.round(video.videoWidth * scale);
     const height = Math.round(video.videoHeight * scale);
@@ -189,6 +117,8 @@ export function mountCapture(root: HTMLElement): () => void {
     scanCtx.drawImage(video, 0, 0, width, height);
     const image = scanCanvas.toDataURL("image/jpeg", SCAN_JPEG_QUALITY);
     const panAtCapture = layer.motion.current; // where the picture was when this frame was taken
+    const seq = ++scanSeq;
+    inFlight++;
 
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), SCAN_REQUEST_TIMEOUT_MS);
@@ -196,58 +126,50 @@ export function mountCapture(root: HTMLElement): () => void {
       const res = await fetch("/api/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image, width, height }),
+        body: JSON.stringify({ image, width, height, fast: true }),
         signal: controller.signal,
       });
       const body = (await res.json()) as ScanResponse | ApiError;
-      if (stopped) return true;
+      if (stopped) return;
       if (!body.ok) {
-        showToast(body.error);
-        return false;
+        if (body.error !== lastError) ui.toast(`The desk spotter hiccuped: ${body.error}`);
+        lastError = body.error;
+        backoffUntil = performance.now() + ERROR_BACKOFF_MS;
+        return;
       }
-      latencyMs = body.latencyMs;
-      mockChip.hidden = !body.mock;
+      lastError = "";
+      if (seq < newestApplied) return; // a newer scan already answered
+      newestApplied = seq;
       layer.update(body.objects, body.imageSize, panAtCapture);
-      return true;
+      matchInBackground(body.objects.map((o) => o.label ?? "")); // unlisted things take the shape of the closest listed one
     } catch {
-      if (!stopped) showToast("Could not reach the server.");
-      return false;
+      if (!stopped && lastError !== "offline") ui.toast("Can't reach the game server. Is it running?");
+      lastError = "offline";
+      backoffUntil = performance.now() + ERROR_BACKOFF_MS;
     } finally {
+      inFlight--;
       window.clearTimeout(timeout);
     }
   };
 
-  const tick = async (): Promise<void> => {
+  const tick = (): void => {
     if (stopped) return;
-    const started = performance.now();
-    const ok = await scanOnce();
-    if (stopped) return;
-    const wait = ok ? SCAN_INTERVAL_MS : ERROR_BACKOFF_MS;
-    scanTimer = window.setTimeout(() => void tick(), Math.max(0, wait - (performance.now() - started)));
+    void startScan();
+    scanTimer = window.setTimeout(tick, SCAN_START_EVERY_MS);
   };
 
-  pixelToggle.addEventListener("click", () => {
-    layer.setPixelWorld(!layer.pixelWorld);
-    renderToggle();
-  });
-  gameToggle.addEventListener("click", () => {
-    story.setOn(!story.on);
-    renderToggle();
-    gameToggle.blur(); // so Space jumps instead of pressing the button again
-  });
-
-  renderUi();
   raf = requestAnimationFrame(draw);
   void startCamera();
-  void tick();
+  tick();
 
   // Called by the router when you leave this page.
   return () => {
     stopped = true;
     cancelAnimationFrame(raf);
     story.dispose();
+    ui.dispose();
+    stopMatching();
     window.clearTimeout(scanTimer);
-    window.clearTimeout(toastTimer);
     stream?.getTracks().forEach((t) => t.stop());
     video.srcObject = null;
   };

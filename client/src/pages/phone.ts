@@ -1,4 +1,4 @@
-import type { ServerToPhone } from "@deskcapade/shared";
+import type { PhoneToServer, ServerToPhone } from "@deskcapade/shared";
 import { connectSocket, type SocketState } from "../lib/socket";
 import { injectStyles } from "../lib/styles";
 
@@ -17,6 +17,19 @@ const LEVELS = [
   { width: 800, quality: 0.65 },
 ] as const;
 const START_LEVEL = 1;
+
+/** The Snap button (shown while a Challenge page is open on the laptop) and its flash. */
+const SNAP_CSS = `
+.dcp-snap { position: fixed; right: 22px; top: 50%; z-index: 6; width: 78px; height: 78px; transform: translateY(-50%);
+  border-radius: 50%; border: 5px solid #2b1d14; background: #fff7e6; box-shadow: 0 0 0 4px #fff7e6, 4px 4px 0 6px #2b1d14;
+  font: 700 26px system-ui, sans-serif; cursor: pointer; }
+.dcp-snap:active { transform: translateY(-50%) scale(0.92); }
+.dcp-snap[hidden], .dcp-flash[hidden] { display: none; }
+.dcp-snaplabel { position: fixed; right: 18px; top: calc(50% + 50px); z-index: 6; width: 86px; text-align: center;
+  font: 700 12px system-ui, sans-serif; color: #fff; text-shadow: 0 1px 3px #000; }
+.dcp-flash { position: fixed; inset: 0; z-index: 7; display: grid; place-items: center; background: rgba(255, 255, 255, 0.85);
+  font: 800 28px system-ui, sans-serif; color: #2b1d14; pointer-events: none; }
+`;
 
 /**
  * Phone page: only streams the camera. No detection happens here.
@@ -41,6 +54,9 @@ export function mountPhone(root: HTMLElement): () => void {
         <button class="dc-btn ghost" id="flip" type="button">Flip camera</button>
       </div>
       <p id="error" class="dcp-error dc-hidden"></p>
+      <button class="dcp-snap" id="snap" type="button" aria-label="Snap the desk photo" hidden>📸</button>
+      <span class="dcp-snaplabel" id="snapLabel" hidden>Snap</span>
+      <div class="dcp-flash" id="flash" hidden>📸 Snapped!</div>
       <div class="dcp-rotate">
         <div class="dcp-icon">📱</div>
         <h2>Turn your phone sideways</h2>
@@ -54,6 +70,14 @@ export function mountPhone(root: HTMLElement): () => void {
   const connText = root.querySelector<HTMLElement>("#connText")!;
   const flipBtn = root.querySelector<HTMLButtonElement>("#flip")!;
   const errorEl = root.querySelector<HTMLElement>("#error")!;
+  const snapBtn = root.querySelector<HTMLButtonElement>("#snap")!;
+  const snapLabel = root.querySelector<HTMLElement>("#snapLabel")!;
+  const flash = root.querySelector<HTMLElement>("#flash")!;
+  const style = document.createElement("style");
+  style.textContent = SNAP_CSS;
+  root.appendChild(style);
+  let canSnap = false;
+  let flashTimer: number | undefined;
 
   let socketState: SocketState = "connecting";
   let desktopConnected = false;
@@ -98,6 +122,8 @@ export function mountPhone(root: HTMLElement): () => void {
     }
     connText.textContent = text;
     connChip.className = cls;
+    snapBtn.hidden = !(socketState === "open" && canSnap && landscape);
+    snapLabel.hidden = snapBtn.hidden;
   };
 
   const onOrientationChange = (): void => {
@@ -150,7 +176,12 @@ export function mountPhone(root: HTMLElement): () => void {
           onAck();
         } else if (msg.type === "status") {
           desktopConnected = msg.desktopConnected;
+          canSnap = msg.canSnap;
           renderStatus();
+        } else if (msg.type === "snapped") {
+          flash.hidden = false;
+          window.clearTimeout(flashTimer);
+          flashTimer = window.setTimeout(() => (flash.hidden = true), 700);
         }
       } catch {
         /* ignore malformed messages */
@@ -194,6 +225,10 @@ export function mountPhone(root: HTMLElement): () => void {
       );
     }
   };
+
+  snapBtn.addEventListener("click", () => {
+    socket.send({ type: "snap" } satisfies PhoneToServer); // the laptop's Challenge page takes the photo
+  });
 
   flipBtn.addEventListener("click", () => {
     facing = facing === "environment" ? "user" : "environment";
@@ -283,6 +318,7 @@ export function mountPhone(root: HTMLElement): () => void {
   return () => {
     stopped = true;
     window.clearTimeout(timer);
+    window.clearTimeout(flashTimer);
     window.clearInterval(watchdog);
     landscapeQuery.removeEventListener("change", onOrientationChange);
     document.removeEventListener("visibilitychange", onVisible);

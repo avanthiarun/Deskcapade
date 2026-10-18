@@ -6,6 +6,8 @@ export const ROUTES = {
   home: "/",
   story: "/story",
   challenge: "/challenge",
+  how: "/how-to-play",
+  credits: "/credits",
   /** Live video, laptop camera (pages/capture.ts) */
   storyLaptop: "/capture",
   /** Live video, phone camera shown on the laptop (pages/desktop.ts) */

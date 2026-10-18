@@ -65,19 +65,18 @@ function codeFromStatus(status: number): string {
   }
 }
 
-function detectBody(imageDataUrl: string): Record<string, unknown> {
+function detectBody(imageDataUrl: string, categories?: readonly string[]): Record<string, unknown> {
   const body: Record<string, unknown> = {
     media: { type: "image", image_url: imageDataUrl },
     config: { output: "box" },
   };
-  if (config.detectCategories) {
-    body.categories = config.detectCategories;
-  }
+  const cats = config.detectCategories ?? categories;
+  if (cats) body.categories = cats;
   return body;
 }
 
 /** Raw POST /v1/detect. Never logs the API key. Used by detectObjects and testDetect. */
-export async function detectRaw(imageDataUrl: string): Promise<{ status: number; body: unknown }> {
+export async function detectRaw(imageDataUrl: string, categories?: readonly string[]): Promise<{ status: number; body: unknown }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DETECT_TIMEOUT_MS);
 
@@ -88,7 +87,7 @@ export async function detectRaw(imageDataUrl: string): Promise<{ status: number;
         Authorization: `Bearer ${config.perceptronApiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(detectBody(imageDataUrl)),
+      body: JSON.stringify(detectBody(imageDataUrl, categories)),
       signal: controller.signal,
     });
     const text = await res.text();
@@ -113,8 +112,12 @@ export async function detectRaw(imageDataUrl: string): Promise<{ status: number;
  * The only module that talks to Perceptron.
  * Never logs or returns the API key.
  */
-export async function detectObjects(imageDataUrl: string): Promise<DetectedObject[]> {
-  const { status, body } = await detectRaw(imageDataUrl);
+/**
+ * `categories`: look only for these kinds of things and label them with these words. Much faster
+ * than free-form descriptions (Story's live scans use it).
+ */
+export async function detectObjects(imageDataUrl: string, categories?: readonly string[]): Promise<DetectedObject[]> {
+  const { status, body } = await detectRaw(imageDataUrl, categories);
   const payload = (body && typeof body === "object" ? body : {}) as DetectPayload;
 
   if (status < 200 || status >= 300) {

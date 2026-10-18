@@ -10,6 +10,7 @@ const bodySchema = z.object({
   image: z.string().startsWith("data:image/"),
   width: z.number().positive(),
   height: z.number().positive(),
+  fast: z.boolean().optional(),
 });
 
 scanRouter.post("/", async (req, res) => {
@@ -21,8 +22,8 @@ scanRouter.post("/", async (req, res) => {
   }
 
   try {
-    const { image, width, height } = parsed.data;
-    res.json(await runScan(image, width, height));
+    const { image, width, height, fast } = parsed.data;
+    res.json(await runScan(image, width, height, { fast }));
   } catch (err) {
     if (err instanceof PerceptronError) {
       const body: ApiError = {
