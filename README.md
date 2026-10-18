@@ -1,4 +1,5 @@
 # Deskcapade
+<<<<<<< HEAD
 
 Hackathon game for the Perceptron track: scan a real desk with a phone camera, then turn detected objects into platforms. **Milestone 1** is phone capture + object detection overlays. Gameplay is stubbed for later.
 
@@ -96,3 +97,6 @@ Some browsers ignore `facingMode`. Switch cameras in the OS permission sheet, or
 - `client/` — Vite + TypeScript capture UI (Phaser installed, unused until later)
 - `server/` — Express scan/health API; Perceptron calls live only in `server/src/services/perceptron.ts`
 - `shared/` — types shared by client and server
+=======
+Deskcapade: scan your desk, play your desk. An AI-generated pixel platformer powered by Perceptron’s vision models.
+>>>>>>> d02333fb36a0d108b09bb753da2137b4933a3470
