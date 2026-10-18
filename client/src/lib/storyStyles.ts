@@ -1,6 +1,7 @@
 /** Extra styles for Story's live pages, on top of gameStyles (so Story looks like Challenge). */
 const CSS = `
 .gm-chip.warn { background: var(--pink); }
+.st-controls { margin: 14px 0 0; font-size: 9px; }
 .st-detected { display: inline-block; margin-top: 14px; padding: 10px 14px; font-size: 10px; line-height: 1.8;
   background: var(--cream); border: 4px solid var(--ink); }
 .st-connect { margin-top: 18px; padding: 14px; background: var(--cream); border: 4px solid var(--ink); }

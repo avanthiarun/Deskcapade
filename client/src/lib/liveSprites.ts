@@ -170,6 +170,8 @@ const CLEAR_MS = 700; // turning it off: tiles disappear over this long
 const MAX_TILES = 30000; // forget revealed tiles after this many (long pans)
 
 type LiveTrack = {
+  /** Stable for as long as the object stays on screen. */
+  id: number;
   label: string;
   templateId: string | null;
   /** Box in "world" coordinates (normalized, with camera motion taken out). */
@@ -193,6 +195,19 @@ const iou = (a: Box, b: Box): number => {
 };
 
 const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
+
+/** A desk object as it is on screen right now (canvas pixels, full size, not mid-animation). */
+export type LiveObject = { id: number; label: string; templateId: string | null; box: Box };
+
+/**
+ * Optional replacement art for an object (the platformer turns cans into vines, mugs into pools...).
+ * Called with the rect the sprite would fill; return true if it drew, false to draw the normal sprite.
+ */
+export type ObjectArtHook = (
+  ctx: CanvasRenderingContext2D,
+  obj: LiveObject,
+  rect: { x: number; y: number; w: number; h: number },
+) => boolean;
 
 /** `b` grown by `frac` of its size on every side, kept inside the picture. */
 const padBox = (b: Box, frac: number, maxW: number, maxH: number): Box => {
@@ -229,7 +244,10 @@ export class LiveSpriteLayer {
   readonly motion = new CameraMotion();
   /** Turn the pixel background on by itself the first time desk objects are found (like Challenge). */
   autoPixelWorld = true;
+  /** Set to draw some objects as something else (see ObjectArtHook). */
+  objectArt: ObjectArtHook | null = null;
   private tracks: LiveTrack[] = [];
+  private nextId = 1;
   private pending: { objects: DetectedObject[]; imageSize: { w: number; h: number }; pan: Pan } | null = null;
   private lastNow = 0;
 
@@ -258,6 +276,19 @@ export class LiveSpriteLayer {
   /** Desk objects currently shown (not the ones leaving). */
   get count(): number {
     return this.tracks.filter((t) => t.leftAt === null && t.misses === 0).length;
+  }
+
+  /** Objects currently on screen with a sprite (not the ones leaving), in canvas pixels of a W x H canvas. */
+  objects(W: number, H: number): LiveObject[] {
+    const pan = this.motion.current;
+    return this.tracks
+      .filter((t) => t.leftAt === null && t.sprite !== null)
+      .map((t) => ({
+        id: t.id,
+        label: t.label,
+        templateId: t.templateId,
+        box: { x: (t.shown.x + pan.x) * W, y: (t.shown.y + pan.y) * H, w: t.shown.w * W, h: t.shown.h * H },
+      }));
   }
 
   labels(): string[] {
@@ -342,6 +373,7 @@ export class LiveSpriteLayer {
         }
       } else {
         const t: LiveTrack = {
+          id: this.nextId++,
           label: c.label,
           templateId,
           target: world,
@@ -475,8 +507,12 @@ export class LiveSpriteLayer {
       const zoom = Math.max(1, Math.min(w / t.sprite.canvas.width, h / t.sprite.canvas.height));
 
       ctx.globalAlpha = t.misses > 0 ? 0.75 : 1; // a little see-through while it might be leaving
-      if (this.pixelWorld) drawSpriteShadow(ctx, { x, y, w, h, zoom });
-      ctx.drawImage(t.sprite.canvas, Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+      const obj: LiveObject = { id: t.id, label: t.label, templateId: t.templateId, box: { x: bx, y: by, w: bw, h: bh } };
+      const rect = { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
+      if (!this.objectArt?.(ctx, obj, rect)) {
+        if (this.pixelWorld) drawSpriteShadow(ctx, { x, y, w, h, zoom });
+        ctx.drawImage(t.sprite.canvas, rect.x, rect.y, rect.w, rect.h);
+      }
       ctx.globalAlpha = 1;
 
       const age = now - t.bornAt;

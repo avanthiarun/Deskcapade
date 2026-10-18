@@ -5,6 +5,7 @@ import type {
   ScanResponse,
   ServerToDesktop,
 } from "@deskcapade/shared";
+import { Platformer } from "../game/platformer";
 import { injectGameStyles } from "../lib/gameStyles";
 import { ROUTES } from "../lib/routes";
 import { injectChallengeStyles } from "../lib/challengeStyles";
@@ -12,9 +13,11 @@ import { pickDeskObjects } from "../lib/deskFilter";
 import {
   composeCoveredScene,
   composePixelWorldScene,
+  deskSceneScale,
   makeDeskSprite,
   type DeskSprite,
 } from "../lib/deskSprites";
+import { drawPixelBackdrop } from "../lib/pixelBackdrop";
 import { playPixelTransition, type PixelTransition } from "../lib/pixelTransition";
 import { connectSocket } from "../lib/socket";
 
@@ -26,6 +29,7 @@ const SCAN_ATTEMPT_WIDTHS = [SNAP_WIDTH, 640, 512];
 /** Server error codes worth retrying: Perceptron was slow, busy, or unreachable. */
 const RETRY_CODES = new Set(["TIMEOUT", "RATE_LIMITED", "NETWORK", "UPSTREAM_ERROR"]);
 const FRAME_HEADER_BYTES = 4; // width + height (uint16 each), then the JPEG
+const BEST_TIME_KEY = "deskcapade.challengeBestMs";
 
 type Source = "laptop" | "phone";
 type Screen = "source" | "camera" | "result";
@@ -75,8 +79,10 @@ export function mountChallenge(root: HTMLElement): () => void {
         <section id="resultView" hidden>
           <div class="gm-verdict" id="verdict"></div>
           <div class="ch-scene" id="scene"></div>
+          <p class="ch-controls" id="controls" hidden>← → / A D move · Space jump · ↑ ↓ climb vines &amp; ladders · ↓ drop through · R restart</p>
           <p class="ch-skipped" id="skipped" hidden></p>
           <div class="gm-row">
+            <button class="gm-btn small" id="restart" type="button" hidden>↺ Restart level</button>
             <button class="gm-btn small" id="again" type="button">📸 Snap another</button>
             <button class="gm-btn small ghost" id="next" type="button">Change camera</button>
             <button class="gm-btn small ghost" id="bgToggle" type="button" aria-pressed="false">🌄 Pixel background: Off</button>
@@ -107,6 +113,8 @@ export function mountChallenge(root: HTMLElement): () => void {
   const skippedEl = q<HTMLElement>("#skipped");
   const bgToggle = q<HTMLButtonElement>("#bgToggle");
   const shelfEl = q<HTMLElement>("#shelf");
+  const controlsEl = q<HTMLElement>("#controls");
+  const restartBtn = q<HTMLButtonElement>("#restart");
   const toast = q<HTMLElement>("#toast");
 
   // ---------- state ----------
@@ -127,6 +135,10 @@ export function mountChallenge(root: HTMLElement): () => void {
   let lastSprites: DeskSprite[] = [];
   /** The photo -> pixel world animation, while it's playing. */
   let transition: PixelTransition | null = null;
+  /** The frozen garden level built around the photo, once the transition is done. */
+  let game: Platformer | null = null;
+  let detachGame: (() => void) | null = null;
+  let gameRaf = 0;
   let stopped = false;
   let raf = 0;
   let toastTimer: number | undefined;
@@ -172,6 +184,7 @@ export function mountChallenge(root: HTMLElement): () => void {
     pendingFrame = null;
     frozenShot = null;
     stopTransition();
+    stopGame();
     window.clearTimeout(infoTimer);
     infoPolls = 0;
     shownUrl = "";
@@ -378,6 +391,94 @@ export function mountChallenge(root: HTMLElement): () => void {
     transition = null;
   };
 
+  const stopGame = (): void => {
+    cancelAnimationFrame(gameRaf);
+    detachGame?.();
+    detachGame = null;
+    game = null;
+    restartBtn.hidden = true;
+    controlsEl.hidden = true;
+  };
+
+  const readBest = (): number | null => {
+    try {
+      const v = Number(localStorage.getItem(BEST_TIME_KEY));
+      return Number.isFinite(v) && v > 0 ? v : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /** Turn the result into a playable level: same photo, objects frozen where they were. */
+  const startGame = (): void => {
+    stopGame();
+    if (!lastShot || lastSprites.length === 0 || stopped) return;
+    const shot = lastShot;
+    const scale = deskSceneScale(shot);
+    const W = Math.round(shot.width * scale);
+    const H = Math.round(shot.height * scale);
+
+    const view = document.createElement("canvas");
+    view.width = W;
+    view.height = H;
+    const vctx = view.getContext("2d")!;
+    const photoBg = document.createElement("canvas");
+    photoBg.width = W;
+    photoBg.height = H;
+    const pctx = photoBg.getContext("2d")!;
+    pctx.imageSmoothingQuality = "high";
+    pctx.drawImage(shot, 0, 0, W, H);
+    const pixelBg = document.createElement("canvas");
+    pixelBg.width = W;
+    pixelBg.height = H;
+    drawPixelBackdrop(pixelBg.getContext("2d")!, W, H);
+
+    const g = new Platformer({
+      mode: "challenge",
+      seed: Math.floor(Math.random() * 1e6),
+      onWin: (ms) => {
+        const best = readBest();
+        const record = best === null || ms < best;
+        if (record) {
+          try {
+            localStorage.setItem(BEST_TIME_KEY, String(Math.round(ms)));
+          } catch {
+            /* storage unavailable: fine */
+          }
+        }
+        verdictEl.textContent = record
+          ? `Garden grown in ${(ms / 1000).toFixed(1)}s! New best ★`
+          : `Garden grown in ${(ms / 1000).toFixed(1)}s! (best ${((best ?? ms) / 1000).toFixed(1)}s)`;
+        verdictEl.className = "gm-verdict win";
+      },
+    });
+    g.setSize(W, H);
+    g.setObjects(
+      lastSprites.map((sp, i) => ({
+        id: `s${i}`,
+        label: sp.label,
+        templateId: sp.templateId,
+        box: { x: sp.box.x * scale, y: sp.box.y * scale, w: sp.box.w * scale, h: sp.box.h * scale },
+        sprite: sp.canvas,
+      })),
+    );
+    game = g;
+    detachGame = g.attachInput();
+    sceneEl.replaceChildren(view);
+    restartBtn.hidden = false;
+    controlsEl.hidden = false;
+
+    const loop = (now: number): void => {
+      if (game !== g) return;
+      vctx.drawImage(pixelBackground ? pixelBg : photoBg, 0, 0);
+      g.drawObjects(vctx, now);
+      g.update(now);
+      g.draw(vctx, now);
+      gameRaf = requestAnimationFrame(loop);
+    };
+    gameRaf = requestAnimationFrame(loop);
+  };
+
   const renderBgToggle = (): void => {
     bgToggle.textContent = `🌄 Pixel background: ${pixelBackground ? "On" : "Off"}`;
     bgToggle.setAttribute("aria-pressed", String(pixelBackground));
@@ -387,7 +488,7 @@ export function mountChallenge(root: HTMLElement): () => void {
   const renderScene = (): void => {
     stopTransition(); // e.g. the background toggle was clicked mid-animation: jump straight to that view
     renderBgToggle();
-    if (!lastShot) return;
+    if (!lastShot || game) return; // the game loop picks up the background itself
     sceneEl.replaceChildren(
       pixelBackground
         ? composePixelWorldScene(lastShot, lastSprites)
@@ -403,7 +504,7 @@ export function mountChallenge(root: HTMLElement): () => void {
 
     verdictEl.textContent =
       sprites.length > 0
-        ? `Found ${sprites.length} desk thing${sprites.length === 1 ? "" : "s"}! ★`
+        ? `Found ${sprites.length} desk thing${sprites.length === 1 ? "" : "s"}! Collect every golden seed ★`
         : "No desk things spotted. Try more light or move closer!";
     verdictEl.className = `gm-verdict ${sprites.length > 0 ? "win" : "lose"}`;
 
@@ -418,6 +519,8 @@ export function mountChallenge(root: HTMLElement): () => void {
       sceneEl.replaceChildren(anim.canvas);
       void anim.done.then(() => {
         if (transition === anim) transition = null;
+        // then it becomes a level (unless you already left this result)
+        if (screen === "result" && lastShot === shot && !stopped) startGame();
       });
     } else {
       renderScene();
@@ -538,6 +641,11 @@ export function mountChallenge(root: HTMLElement): () => void {
   bgToggle.addEventListener("click", () => {
     pixelBackground = !pixelBackground;
     renderScene();
+    bgToggle.blur(); // so Space jumps instead of pressing the button again
+  });
+  restartBtn.addEventListener("click", () => {
+    game?.restart();
+    restartBtn.blur();
   });
 
   render();

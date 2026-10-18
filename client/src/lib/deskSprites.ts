@@ -8,7 +8,7 @@ import { pixelateCrop } from "./sprites";
    Turn a detected desk object into a cute sprite:
    1) dictionary hit  -> premade template, recolored with the object's real color
    2) no dictionary hit -> the pixelization algorithm on the photo crop (fallback only)
-   Then draw the sprites centered in their boxes on the (background-blurred) photo.
+   Then draw each sprite over its whole box (same size as the real object).
    ------------------------------------------------------------------ */
 
 export type Rgb = readonly [number, number, number];
@@ -233,21 +233,17 @@ export function makeDeskSprite(label: string, photo: HTMLCanvasElement, box: Box
   return { label, box, canvas: pixelateCrop(photo, box), source: "pixelated", templateId: null };
 }
 
-/** Where a sprite lands: centered in its box, as big as fits, with a whole-number zoom so every art pixel is the same size. */
+/** Where a sprite lands: exactly its object's box, so the sprite is the same size as the real thing. */
 export function deskSpriteRect(sp: DeskSprite, scale = 1): { x: number; y: number; w: number; h: number; zoom: number } | null {
-  const bx = sp.box.x * scale;
-  const by = sp.box.y * scale;
-  const bw = sp.box.w * scale;
-  const bh = sp.box.h * scale;
   const cw = sp.canvas.width;
   const ch = sp.canvas.height;
-  if (cw === 0 || ch === 0 || bw <= 0 || bh <= 0) return null;
+  if (cw === 0 || ch === 0 || sp.box.w <= 0 || sp.box.h <= 0) return null;
 
-  let zoom = Math.min((bw * 0.92) / cw, (bh * 0.92) / ch);
-  if (zoom >= 1) zoom = Math.floor(zoom);
-  const w = Math.round(cw * zoom);
-  const h = Math.round(ch * zoom);
-  return { x: Math.round(bx + (bw - w) / 2), y: Math.round(by + (bh - h) / 2), w, h, zoom };
+  const x = Math.round(sp.box.x * scale);
+  const y = Math.round(sp.box.y * scale);
+  const w = Math.round((sp.box.x + sp.box.w) * scale) - x;
+  const h = Math.round((sp.box.y + sp.box.h) * scale) - y;
+  return { x, y, w, h, zoom: Math.max(1, Math.min(w / cw, h / ch)) };
 }
 
 /** The little ground shadow under a sprite drawn at `r`. */
@@ -261,7 +257,7 @@ export function drawSpriteShadow(
   ctx.fill();
 }
 
-/** Draw sprites centered in their boxes with crisp nearest-neighbor pixels. `scale` maps photo pixels to `ctx` pixels. */
+/** Draw sprites filling their boxes with crisp nearest-neighbor pixels. `scale` maps photo pixels to `ctx` pixels. */
 export function drawDeskSprites(ctx: CanvasRenderingContext2D, sprites: readonly DeskSprite[], scale = 1): void {
   ctx.save();
   ctx.imageSmoothingEnabled = false;

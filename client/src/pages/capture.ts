@@ -1,4 +1,5 @@
 import type { ApiError, ScanResponse } from "@deskcapade/shared";
+import { StoryGame } from "../game/storyGame";
 import { LiveSpriteLayer, renderLiveDetectedText } from "../lib/liveSprites";
 import { injectGameStyles } from "../lib/gameStyles";
 import { ROUTES } from "../lib/routes";
@@ -33,7 +34,9 @@ export function mountCapture(root: HTMLElement): () => void {
           <span class="gm-chip" id="latencyChip">– ms</span>
           <span class="gm-chip warn" id="mockChip" hidden>MOCK</span>
           <button class="gm-btn small ghost" id="pixelToggle" type="button" aria-pressed="false">🌄 Pixel world: Off</button>
+          <button class="gm-btn small" id="gameToggle" type="button" aria-pressed="true">🌱 Garden game: On</button>
         </div>
+        <p class="gm-note st-controls" id="controls">← → / A D move · Space jump · ↑ ↓ climb vines &amp; ladders · ↓ drop through · R respawn. Collect the golden seeds on the branches!</p>
 
         <p class="st-detected" id="detected" hidden aria-live="polite"></p>
 
@@ -55,10 +58,13 @@ export function mountCapture(root: HTMLElement): () => void {
   const detectedEl = q<HTMLElement>("#detected");
   const toast = q<HTMLElement>("#toast");
   const pixelToggle = q<HTMLButtonElement>("#pixelToggle");
+  const gameToggle = q<HTMLButtonElement>("#gameToggle");
+  const controlsEl = q<HTMLElement>("#controls");
 
   // ---------- state ----------
 
   const layer = new LiveSpriteLayer();
+  const story = new StoryGame(layer);
   let lastVideoTime = -1;
   let cameraState: CameraState = "starting";
   let cameraError = "";
@@ -83,6 +89,9 @@ export function mountCapture(root: HTMLElement): () => void {
   const renderToggle = (): void => {
     pixelToggle.textContent = `🌄 Pixel world: ${layer.pixelWorld ? "On" : "Off"}`;
     pixelToggle.setAttribute("aria-pressed", String(layer.pixelWorld));
+    gameToggle.textContent = `🌱 Garden game: ${story.on ? "On" : "Off"}`;
+    gameToggle.setAttribute("aria-pressed", String(story.on));
+    controlsEl.hidden = !story.on;
   };
 
 
@@ -159,6 +168,7 @@ export function mountCapture(root: HTMLElement): () => void {
     }
 
     layer.draw(ctx);
+    story.frame(ctx);
     if (!stopped) raf = requestAnimationFrame(draw);
   };
 
@@ -220,6 +230,11 @@ export function mountCapture(root: HTMLElement): () => void {
     layer.setPixelWorld(!layer.pixelWorld);
     renderToggle();
   });
+  gameToggle.addEventListener("click", () => {
+    story.setOn(!story.on);
+    renderToggle();
+    gameToggle.blur(); // so Space jumps instead of pressing the button again
+  });
 
   renderUi();
   raf = requestAnimationFrame(draw);
@@ -230,6 +245,7 @@ export function mountCapture(root: HTMLElement): () => void {
   return () => {
     stopped = true;
     cancelAnimationFrame(raf);
+    story.dispose();
     window.clearTimeout(scanTimer);
     window.clearTimeout(toastTimer);
     stream?.getTracks().forEach((t) => t.stop());

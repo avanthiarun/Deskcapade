@@ -1,5 +1,6 @@
 import QRCode from "qrcode";
 import type { InfoResponse, ServerToDesktop } from "@deskcapade/shared";
+import { StoryGame } from "../game/storyGame";
 import { LiveSpriteLayer, renderLiveDetectedText } from "../lib/liveSprites";
 import { injectGameStyles } from "../lib/gameStyles";
 import { ROUTES } from "../lib/routes";
@@ -32,7 +33,9 @@ export function mountDesktop(root: HTMLElement): () => void {
           <span class="gm-chip" id="latencyChip">– ms</span>
           <span class="gm-chip warn" id="mockChip" hidden>MOCK</span>
           <button class="gm-btn small ghost" id="pixelToggle" type="button" aria-pressed="false">🌄 Pixel world: Off</button>
+          <button class="gm-btn small" id="gameToggle" type="button" aria-pressed="true">🌱 Garden game: On</button>
         </div>
+        <p class="gm-note st-controls" id="controls">← → / A D move · Space jump · ↑ ↓ climb vines &amp; ladders · ↓ drop through · R respawn. Collect the golden seeds on the branches!</p>
 
         <p class="st-detected" id="detected" hidden aria-live="polite"></p>
 
@@ -77,10 +80,13 @@ export function mountDesktop(root: HTMLElement): () => void {
   const lanSelect = q<HTMLSelectElement>("#lanSelect");
   const baseOverride = q<HTMLInputElement>("#baseOverride");
   const pixelToggle = q<HTMLButtonElement>("#pixelToggle");
+  const gameToggle = q<HTMLButtonElement>("#gameToggle");
+  const controlsEl = q<HTMLElement>("#controls");
 
   // ---------- state ----------
 
   const layer = new LiveSpriteLayer();
+  const story = new StoryGame(layer);
   let socketOpen = false;
   let phoneConnected = false;
   let frameImg: ImageBitmap | null = null;
@@ -107,6 +113,9 @@ export function mountDesktop(root: HTMLElement): () => void {
   const renderToggle = (): void => {
     pixelToggle.textContent = `🌄 Pixel world: ${layer.pixelWorld ? "On" : "Off"}`;
     pixelToggle.setAttribute("aria-pressed", String(layer.pixelWorld));
+    gameToggle.textContent = `🌱 Garden game: ${story.on ? "On" : "Off"}`;
+    gameToggle.setAttribute("aria-pressed", String(story.on));
+    controlsEl.hidden = !story.on;
   };
 
 
@@ -226,6 +235,7 @@ export function mountDesktop(root: HTMLElement): () => void {
     }
 
     layer.draw(ctx, now);
+    story.frame(ctx, now);
 
     if (!hasFrame) {
       ctx.fillStyle = "rgba(18, 15, 32, 0.6)";
@@ -334,6 +344,11 @@ export function mountDesktop(root: HTMLElement): () => void {
     layer.setPixelWorld(!layer.pixelWorld);
     renderToggle();
   });
+  gameToggle.addEventListener("click", () => {
+    story.setOn(!story.on);
+    renderToggle();
+    gameToggle.blur(); // so Space jumps instead of pressing the button again
+  });
   lanSelect.addEventListener("change", () => {
     userPicked = true;
     void renderConnect();
@@ -347,6 +362,7 @@ export function mountDesktop(root: HTMLElement): () => void {
   return () => {
     stopped = true;
     cancelAnimationFrame(raf);
+    story.dispose();
     window.clearTimeout(toastTimer);
     window.clearTimeout(infoTimer);
     frameImg?.close();
