@@ -1,6 +1,8 @@
 import QRCode from "qrcode";
 import type { InfoResponse, ServerToDesktop } from "@deskcapade/shared";
+import { GardenWorld } from "../game/garden/gardenWorld";
 import { ObjectTracker, renderDetectedText } from "../lib/detections";
+import { ROUTES } from "../lib/routes";
 import { connectSocket } from "../lib/socket";
 import { injectStyles } from "../lib/styles";
 
@@ -9,9 +11,8 @@ const BASE_STORAGE_KEY = "deskcapade.phoneBase";
 const FRAME_HEADER_BYTES = 4; // width + height (uint16 each), then the JPEG
 
 /**
- * Phone-camera page (opened on the laptop): shows the phone's video with detection boxes on top
- * and the "Detected: ..." text underneath. It never opens the laptop camera. Detection runs
- * automatically on the server (every 250 ms), so there are no scan controls here.
+ * Phone-camera garden page (opened on the laptop): a cute pixel garden built from the phone
+ * camera. It never opens the laptop camera. Detection runs on the server.
  */
 export function mountDesktop(root: HTMLElement): () => void {
   injectStyles();
@@ -19,12 +20,14 @@ export function mountDesktop(root: HTMLElement): () => void {
   root.innerHTML = `
     <div class="dc-page dcd">
       <div class="dc-stage dcd-stage">
-        <canvas id="view" width="1280" height="720"></canvas>
+        <canvas id="view" width="220" height="124"></canvas>
+        <p class="dcd-caption" id="caption">The desk is quiet. Move something, and a legend starts.</p>
       </div>
 
       <div class="dcd-info">
         <div class="dcd-top">
-          <h1>Deskcapade</h1>
+          <a class="dcd-back" href="${ROUTES.story}">◀ Story</a>
+          <h1>Story</h1>
           <div class="dc-bar">
             <span class="dc-chip" id="phoneChip"><span class="dc-dot"></span><span id="phoneText">Connecting…</span></span>
             <span class="dc-chip" id="countChip">0 objects</span>
@@ -61,7 +64,7 @@ export function mountDesktop(root: HTMLElement): () => void {
 
   const q = <T extends HTMLElement>(sel: string): T => root.querySelector<T>(sel)!;
   const canvas = q<HTMLCanvasElement>("#view");
-  const ctx = canvas.getContext("2d")!;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
   const phoneChip = q<HTMLElement>("#phoneChip");
   const phoneText = q<HTMLElement>("#phoneText");
   const countChip = q<HTMLElement>("#countChip");
@@ -69,6 +72,7 @@ export function mountDesktop(root: HTMLElement): () => void {
   const mockChip = q<HTMLElement>("#mockChip");
   const detectedEl = q<HTMLElement>("#detected");
   const toast = q<HTMLElement>("#toast");
+  const caption = q<HTMLElement>("#caption");
   const connect = q<HTMLDetailsElement>("#connect");
   const qrImg = q<HTMLImageElement>("#qr");
   const phoneUrlEl = q<HTMLElement>("#phoneUrl");
@@ -79,6 +83,7 @@ export function mountDesktop(root: HTMLElement): () => void {
   // ---------- state ----------
 
   const tracker = new ObjectTracker();
+  const world = new GardenWorld();
   let socketOpen = false;
   let phoneConnected = false;
   let frameImg: ImageBitmap | null = null;
@@ -196,26 +201,18 @@ export function mountDesktop(root: HTMLElement): () => void {
   const draw = (): void => {
     const now = performance.now();
     const hasFrame = frameImg !== null && now - lastFrameAt < STALE_FRAME_MS;
-
-    if (frameImg) {
-      const w = frameImg.width;
-      const h = frameImg.height;
-      if (w > 0 && (canvas.width !== w || canvas.height !== h)) {
-        canvas.width = w;
-        canvas.height = h;
-      }
-      ctx.drawImage(frameImg, 0, 0, canvas.width, canvas.height);
-    } else {
-      ctx.fillStyle = "#120f20";
+    tracker.tick();
+    caption.textContent = world.draw(
+      ctx,
+      hasFrame ? frameImg : null,
+      canvas,
+      tracker.list(),
+      now,
+    );
+    if (!hasFrame && frameImg) {
+      ctx.fillStyle = "rgba(18, 15, 32, 0.45)";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
-
-    if (!hasFrame) {
-      ctx.fillStyle = "rgba(18, 15, 32, 0.6)";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-    }
-
-    tracker.draw(ctx, canvas.width, canvas.height);
     if (!stopped) raf = requestAnimationFrame(draw);
   };
   raf = requestAnimationFrame(draw);
@@ -331,6 +328,7 @@ export function mountDesktop(root: HTMLElement): () => void {
     window.clearTimeout(infoTimer);
     frameImg?.close();
     frameImg = null;
+    world.dispose();
     socket.close();
   };
 }

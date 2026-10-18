@@ -13,7 +13,7 @@ export function mountStory(root: HTMLElement): () => void {
       <div class="gm-wrap">
         <a class="gm-back" href="${ROUTES.home}">◀ Home</a>
         <h1 class="gm-h1">Story</h1>
-        <p class="gm-note">Which camera should watch the world? It looks continuously, so things pop up as you move them.</p>
+        <p class="gm-note">Live camera, pixel world. A mug can become a duck pond with a waterslide; a bowl can turn into lava. The hero reacts to whatever is on the desk.</p>
         <div class="gm-choices">
           <a class="gm-btn" href="${ROUTES.storyLaptop}"><b>Laptop camera</b><span>Use this computer's camera</span></a>
           <a class="gm-btn alt" href="${ROUTES.storyPhone}"><b>Phone camera</b><span>Use your phone as the camera</span></a>

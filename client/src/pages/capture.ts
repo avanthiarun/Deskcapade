@@ -1,5 +1,7 @@
 import type { ApiError, ScanResponse } from "@deskcapade/shared";
+import { GardenWorld } from "../game/garden/gardenWorld";
 import { ObjectTracker, renderDetectedText } from "../lib/detections";
+import { ROUTES } from "../lib/routes";
 import { injectStyles } from "../lib/styles";
 
 const SCAN_INTERVAL_MS = 250; // detection always runs automatically, every 250 ms
@@ -11,9 +13,8 @@ const SCAN_JPEG_QUALITY = 0.7;
 type CameraState = "starting" | "on" | "error";
 
 /**
- * Laptop-camera page: same view as the phone-camera page (boxes on the video, "Detected: ..."
- * text underneath, automatic scanning every 250 ms). The only difference is the video source:
- * this computer's own camera instead of the phone.
+ * Laptop-camera Story page: live video is pixelated and objects are restyled (mug → duck pond,
+ * etc.). Scanning runs every 250 ms. Phone camera uses desktop.ts instead.
  */
 export function mountCapture(root: HTMLElement): () => void {
   injectStyles();
@@ -21,12 +22,14 @@ export function mountCapture(root: HTMLElement): () => void {
   root.innerHTML = `
     <div class="dc-page dcd">
       <div class="dc-stage dcd-stage">
-        <canvas id="view" width="1280" height="720"></canvas>
+        <canvas id="view" width="220" height="124"></canvas>
+        <p class="dcd-caption" id="caption">The desk is quiet. Move something, and a legend starts.</p>
       </div>
 
       <div class="dcd-info">
         <div class="dcd-top">
-          <h1>Deskcapade</h1>
+          <a class="dcd-back" href="${ROUTES.story}">◀ Story</a>
+          <h1>Story</h1>
           <div class="dc-bar">
             <span class="dc-chip" id="cameraChip"><span class="dc-dot"></span><span id="cameraText">Starting camera…</span></span>
             <span class="dc-chip" id="countChip">0 objects</span>
@@ -45,7 +48,7 @@ export function mountCapture(root: HTMLElement): () => void {
 
   const q = <T extends HTMLElement>(sel: string): T => root.querySelector<T>(sel)!;
   const canvas = q<HTMLCanvasElement>("#view");
-  const ctx = canvas.getContext("2d")!;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
   const video = q<HTMLVideoElement>("#video");
   const cameraChip = q<HTMLElement>("#cameraChip");
   const cameraText = q<HTMLElement>("#cameraText");
@@ -54,10 +57,12 @@ export function mountCapture(root: HTMLElement): () => void {
   const mockChip = q<HTMLElement>("#mockChip");
   const detectedEl = q<HTMLElement>("#detected");
   const toast = q<HTMLElement>("#toast");
+  const caption = q<HTMLElement>("#caption");
 
   // ---------- state ----------
 
   const tracker = new ObjectTracker();
+  const world = new GardenWorld();
   let cameraState: CameraState = "starting";
   let cameraError = "";
   let stream: MediaStream | null = null;
@@ -133,18 +138,9 @@ export function mountCapture(root: HTMLElement): () => void {
   // ---------- drawing ----------
 
   const draw = (): void => {
-    if (video.readyState >= 2 && video.videoWidth > 0) {
-      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-      }
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    } else {
-      ctx.fillStyle = "#120f20";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-    }
-
-    tracker.draw(ctx, canvas.width, canvas.height);
+    tracker.tick();
+    const src = video.readyState >= 2 && video.videoWidth > 0 ? video : null;
+    caption.textContent = world.draw(ctx, src, canvas, tracker.list(), performance.now());
     if (!stopped) raf = requestAnimationFrame(draw);
   };
 
@@ -214,6 +210,7 @@ export function mountCapture(root: HTMLElement): () => void {
     window.clearTimeout(scanTimer);
     window.clearTimeout(toastTimer);
     stream?.getTracks().forEach((t) => t.stop());
+    world.dispose();
     video.srcObject = null;
   };
 }

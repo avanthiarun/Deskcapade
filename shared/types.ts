@@ -60,3 +60,27 @@ export type ServerToDesktop = FrameMessage | ScanResultMessage | StatusToDesktop
 export type ServerToPhone = { type: "status"; desktopConnected: boolean } | { type: "ack" };
 
 export type InfoResponse = { lanUrls: string[]; tunnelUrl?: string };
+// ---------- Desk Garden: AI-decided transformations ----------
+
+export type ObjectRole = "platform" | "house" | "pool" | "bridge" | "hazard" | "bounce" | "garden" | "nap";
+export type RoofStyle = "none" | "flat" | "cone" | "dome";
+export type Decoration =
+  | "flowers" | "windows" | "chimney" | "flag" | "lilypads"
+  | "mushrooms" | "lanterns" | "sign" | "ducks" | "clouds";
+export type ObjectMood = "idle" | "nap" | "nervous" | "cheer";
+
+export type TransformSpec = {
+  name: string; // "Soda Castle"
+  role: ObjectRole;
+  ladder: "left" | "right" | "none";
+  roof: RoofStyle;
+  decorations: Decoration[];
+  accent: string; // "#rrggbb"
+  mood: ObjectMood; // how the hero reacts near it
+  action: string; // hint for the Space key
+  caption: string;
+  source: "ai" | "rules";
+};
+
+export type TransformRequest = { label: string; shape: "tall" | "wide" | "square" };
+export type TransformResponse = { ok: true; spec: TransformSpec };

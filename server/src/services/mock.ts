@@ -1,10 +1,11 @@
 import type { DetectedObject } from "@deskcapade/shared";
 
 const TEMPLATES: { nx: number; ny: number; nw: number; nh: number; label: string }[] = [
-  { nx: 0.08, ny: 0.18, nw: 0.22, nh: 0.16, label: "mug" },
-  { nx: 0.38, ny: 0.42, nw: 0.28, nh: 0.18, label: "keyboard" },
-  { nx: 0.62, ny: 0.12, nw: 0.24, nh: 0.2, label: "monitor" },
-  { nx: 0.18, ny: 0.62, nw: 0.2, nh: 0.14, label: "notebook" },
+  { nx: 0.08, ny: 0.22, nw: 0.26, nh: 0.28, label: "mug" },
+  { nx: 0.40, ny: 0.48, nw: 0.32, nh: 0.16, label: "keyboard" },
+  { nx: 0.68, ny: 0.18, nw: 0.2, nh: 0.22, label: "plant" },
+  { nx: 0.18, ny: 0.62, nw: 0.18, nh: 0.16, label: "phone" },
+  { nx: 0.52, ny: 0.12, nw: 0.16, nh: 0.14, label: "bowl" },
 ];
 
 function jitter(n: number, amount: number): number {

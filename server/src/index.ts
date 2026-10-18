@@ -9,6 +9,7 @@ import { config, logStartupMode } from "./config.js";
 import { attachRelay } from "./relay.js";
 import { healthRouter } from "./routes/health.js";
 import { scanRouter } from "./routes/scan.js";
+import { transformRouter } from "./routes/transform.js";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const TUNNEL_FILE = path.join(rootDir, ".tunnel-url"); // written by scripts/tunnel.mjs
@@ -44,7 +45,7 @@ function lanUrls(): string[] {
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
-
+app.use("/api/transform", transformRouter);
 app.use("/api/health", healthRouter);
 app.use("/api/scan", scanRouter);
 app.get("/api/info", (_req, res) => {

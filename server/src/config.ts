@@ -11,6 +11,9 @@ const PLACEHOLDER_KEY = "your-api-key-here";
 const envSchema = z.object({
   PERCEPTRON_API_KEY: z.string().optional().default(""),
   PERCEPTRON_BASE_URL: z.string().url().default("https://api.perceptron.inc"),
+  // inside envSchema
+  GEMINI_API_KEY: z.string().optional().default(""),
+  GEMINI_MODEL: z.string().default("gemini-1.5-flash"),
   PORT: z.coerce.number().int().positive().default(8787),
   USE_MOCK: z
     .string()
@@ -40,6 +43,8 @@ export const config = {
   perceptronBaseUrl: parsed.PERCEPTRON_BASE_URL.replace(/\/+$/, ""),
   /** Use only inside perceptron.ts. Never log this value. */
   perceptronApiKey: apiKey,
+  geminiApiKey: parsed.GEMINI_API_KEY.trim(),
+  geminiModel: parsed.GEMINI_MODEL,
   mock,
   detectCategories: parseCategories(parsed.DETECT_CATEGORIES),
   scanMaxWidth: parsed.SCAN_MAX_WIDTH,

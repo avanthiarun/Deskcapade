@@ -202,20 +202,25 @@ select {
 .dc-page.dcd {
   max-width: none;
   min-height: 100dvh;
+  height: 100dvh;
   padding: 0;
   display: flex;
   flex-direction: column;
   gap: 0;
+  overflow: hidden;
 }
 
 /* Everything below the full-screen video (status chips, "Detected: ...", connect panel). */
 .dcd .dcd-info {
   width: 100%;
   max-width: 1200px;
-  padding: 16px;
+  padding: 12px 16px 16px;
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
+  flex-shrink: 0;
+  overflow: auto;
+  max-height: 40dvh;
 }
 
 .dcd .dcd-top {
@@ -238,19 +243,51 @@ select {
   position: relative;
   width: 100%;
   max-width: none;
-  height: 100dvh;
+  flex: 1;
+  min-height: 0;
+  height: auto;
   border: 0;
   border-radius: 0;
-  background: #000;
+  background: #120f20;
 }
 
 .dcd #view {
   display: block;
   width: 100%;
-  height: 100dvh;
+  height: 100%;
   object-fit: contain;
-  background: #000;
+  background: #1d3f7a;
   border-radius: 0;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.dcd-caption {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 16px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 4px solid #2b1d3a;
+  background: #fff7e6;
+  color: #2b1d3a;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.45;
+  pointer-events: none;
+}
+
+.dcd-back {
+  display: inline-block;
+  padding: 4px 8px;
+  border: 3px solid #2b1d3a;
+  background: #fff7e6;
+  color: #2b1d3a;
+  text-decoration: none;
+  font-size: 0.8rem;
+  font-weight: 700;
 }
 
 /* "Detected: ..." text shown under the video (never on top of it). */
