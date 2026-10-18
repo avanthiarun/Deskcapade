@@ -20,7 +20,12 @@ type Handlers = {
 const MAX_BACKOFF_MS = 5000;
 
 /** WebSocket to /ws with automatic reconnect (backoff 0.5s -> 5s). */
-export function connectSocket(role: "phone" | "desktop", handlers: Handlers): SocketHandle {
+/** `scan: false` = this viewer only watches (used by the single-photo Challenge page), so the server skips its automatic scanning for it. */
+export function connectSocket(
+  role: "phone" | "desktop",
+  handlers: Handlers,
+  opts: { scan?: boolean } = {},
+): SocketHandle {
   let ws: WebSocket | null = null;
   let attempts = 0;
   let stopped = false;
@@ -30,7 +35,7 @@ export function connectSocket(role: "phone" | "desktop", handlers: Handlers): So
     if (stopped) return;
     handlers.onState("connecting");
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(`${proto}//${location.host}/ws?role=${role}`);
+    ws = new WebSocket(`${proto}//${location.host}/ws?role=${role}${opts.scan === false ? "&scan=0" : ""}`);
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {

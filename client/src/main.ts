@@ -1,30 +1,29 @@
 import "./styles.css";
 import { mountCapture } from "./pages/capture";
+import { mountChallenge } from "./pages/challenge";
 import { mountDesktop } from "./pages/desktop";
+import { mountHome } from "./pages/home";
 import { mountPhone } from "./pages/phone";
 import { mountPlay } from "./pages/play";
+import { mountStory } from "./pages/story";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 let dispose: (() => void) | null = null;
-
-function landing(): void {
-  app.innerHTML = `
-    <div class="landing">
-      <h1>Deskcapade</h1>
-      <p>Scan your desk with a camera and watch it live. Detected objects become platforms later.</p>
-      <nav>
-        <a href="/capture"><strong>Laptop camera</strong> — use this computer's camera to detect objects</a>
-        <a href="/desktop"><strong>Phone camera</strong> — scan the QR code to stream your phone's camera here</a>
-      </nav>
-    </div>
-  `;
-}
 
 function route(): void {
   dispose?.();
   dispose = null;
   const path = window.location.pathname.replace(/\/+$/, "") || "/";
-  // /phone is the page the QR code opens on the phone; /play is still reachable by URL.
+  // "/" is the home screen. /story and /challenge are the two game modes.
+  // /capture and /desktop are Story's live-camera pages; /phone is what the QR code opens on the phone.
+  if (path === "/story") {
+    dispose = mountStory(app);
+    return;
+  }
+  if (path === "/challenge") {
+    dispose = mountChallenge(app);
+    return;
+  }
   if (path === "/desktop") {
     dispose = mountDesktop(app);
     return;
@@ -41,7 +40,8 @@ function route(): void {
     dispose = mountPlay(app);
     return;
   }
-  landing();
+  // Home screen (also the fallback for unknown addresses).
+  dispose = mountHome(app);
 }
 
 document.addEventListener("click", (ev) => {

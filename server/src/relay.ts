@@ -49,6 +49,8 @@ export function attachRelay(server: HttpServer): void {
 
   const phones = new Set<AliveSocket>();
   const desktops = new Set<AliveSocket>();
+  // Desktops that want automatic scanning (the live-video pages). The Challenge page connects with scan=0.
+  const scanners = new Set<AliveSocket>();
 
   let latestFrame: LatestFrame | null = null;
   let lastScannedFrame: LatestFrame | null = null;
@@ -117,7 +119,7 @@ export function attachRelay(server: HttpServer): void {
     }
   }
 
-  const shouldScan = (): boolean => desktops.size > 0 && phones.size > 0;
+  const shouldScan = (): boolean => scanners.size > 0 && phones.size > 0;
 
   async function tick(gen: number): Promise<void> {
     if (gen !== loopGen) return;
@@ -188,9 +190,11 @@ export function attachRelay(server: HttpServer): void {
       });
     } else if (role === "desktop") {
       desktops.add(ws);
+      if (url.searchParams.get("scan") !== "0") scanners.add(ws);
       // Desktops only watch: they send nothing the server needs to act on.
       ws.on("close", () => {
         desktops.delete(ws);
+        scanners.delete(ws);
         syncScanLoop(); // stops scanning when nobody is watching
         broadcastStatus();
       });
