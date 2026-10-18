@@ -1,0 +1,21 @@
+{
+  "name": "@deskcapade/client",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@deskcapade/shared": "*",
+    "phaser": "^3.88.2",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.6",
+    "@vitejs/plugin-basic-ssl": "^1.2.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}

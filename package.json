@@ -1,0 +1,18 @@
+{
+  "name": "deskcapade",
+  "private": true,
+  "workspaces": [
+    "shared",
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"npm run dev -w server\" \"npm run dev -w client\"",
+    "dev:all": "concurrently -n server,client,tunnel -c blue,green,magenta \"npm run dev -w server\" \"npm run dev -w client\" \"node scripts/tunnel.mjs\"",
+    "build": "npm run build -w shared && npm run build -w server && npm run build -w client"
+  },
+  "devDependencies": {
+    "cloudflared": "^0.7.3",
+    "concurrently": "^9.1.2"
+  }
+}
