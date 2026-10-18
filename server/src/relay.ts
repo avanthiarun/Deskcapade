@@ -3,7 +3,6 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { z } from "zod";
 import type {
   ErrorMessage,
-  FrameMessage,
   ScanResultMessage,
   ServerToPhone,
   StatusToDesktop,
@@ -13,16 +12,12 @@ import { PerceptronError } from "./services/perceptron.js";
 import { runScan } from "./services/scan.js";
 
 const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;
-const MAX_BUFFERED_BYTES = 2 * 1024 * 1024; // skip frames for a slow desktop
+// Skip frames for a slow desktop. Kept small so old frames are dropped instead of queued,
+// which keeps the laptop's video close to live.
+const MAX_BUFFERED_BYTES = 128 * 1024;
 const MIN_AUTOSCAN_MS = 1000;
 const HEARTBEAT_MS = 20_000;
-
-const frameSchema = z.object({
-  type: z.literal("frame"),
-  image: z.string().startsWith("data:image/"),
-  width: z.number().positive(),
-  height: z.number().positive(),
-});
+const FRAME_HEADER_BYTES = 4;
 
 const desktopMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("scan") }),
@@ -35,8 +30,23 @@ const desktopMessageSchema = z.discriminatedUnion("type", [
 
 type AliveSocket = WebSocket & { isAlive?: boolean };
 
+/** Latest camera frame. `buf` is the whole binary message: 4-byte header + JPEG bytes. */
+type LatestFrame = { buf: Buffer; width: number; height: number };
+
+function toBuffer(data: RawData): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (Array.isArray(data)) return Buffer.concat(data);
+  return Buffer.from(data);
+}
+
 /**
  * One room: any number of phones (camera) and desktops (viewer).
+ *
+ * Frame wire format (phone -> server -> desktop), a binary websocket message:
+ *   bytes 0-1: width  (uint16, little-endian)
+ *   bytes 2-3: height (uint16, little-endian)
+ *   bytes 4+ : JPEG image
+ *
  * Phone frames are relayed to desktops; desktops ask the server to scan the latest frame.
  */
 export function attachRelay(server: HttpServer): void {
@@ -45,7 +55,7 @@ export function attachRelay(server: HttpServer): void {
   const phones = new Set<AliveSocket>();
   const desktops = new Set<AliveSocket>();
 
-  let latestFrame: FrameMessage | null = null;
+  let latestFrame: LatestFrame | null = null;
   let autoscan = { enabled: false, intervalMs: 1500 };
   let timer: NodeJS.Timeout | null = null;
   let scanning = false;
@@ -103,7 +113,8 @@ export function attachRelay(server: HttpServer): void {
     scanning = true;
     try {
       const frame = latestFrame;
-      const result = await runScan(frame.image, frame.width, frame.height);
+      const image = `data:image/jpeg;base64,${frame.buf.subarray(FRAME_HEADER_BYTES).toString("base64")}`;
+      const result = await runScan(image, frame.width, frame.height);
       broadcastDesktops({ type: "scanResult", ...result } satisfies ScanResultMessage);
     } catch (err) {
       sendError(err);
@@ -138,22 +149,19 @@ export function attachRelay(server: HttpServer): void {
 
     if (role === "phone") {
       phones.add(ws);
-      ws.on("message", (data: RawData) => {
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(data.toString());
-        } catch {
-          return;
-        }
-        const frame = frameSchema.safeParse(parsed);
-        if (!frame.success) return;
+      ws.on("message", (data: RawData, isBinary: boolean) => {
+        if (!isBinary) return;
+        const buf = toBuffer(data);
+        if (buf.length <= FRAME_HEADER_BYTES) return;
+        const width = buf.readUInt16LE(0);
+        const height = buf.readUInt16LE(2);
+        if (width === 0 || height === 0) return;
 
-        latestFrame = frame.data;
+        latestFrame = { buf, width, height };
         sendJson(ws, { type: "ack" } satisfies ServerToPhone); // lets the phone send the next frame
-        const text = data.toString(); // relay the original message untouched
         for (const desk of desktops) {
           if (desk.readyState === WebSocket.OPEN && desk.bufferedAmount < MAX_BUFFERED_BYTES) {
-            desk.send(text);
+            desk.send(buf); // a Buffer goes out as a binary message, relayed untouched
           }
         }
       });
@@ -164,10 +172,11 @@ export function attachRelay(server: HttpServer): void {
       });
     } else if (role === "desktop") {
       desktops.add(ws);
-      ws.on("message", (data: RawData) => {
+      ws.on("message", (data: RawData, isBinary: boolean) => {
+        if (isBinary) return;
         let parsed: unknown;
         try {
-          parsed = JSON.parse(data.toString());
+          parsed = JSON.parse(toBuffer(data).toString());
         } catch {
           return;
         }

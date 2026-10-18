@@ -3,6 +3,8 @@ export type SocketState = "connecting" | "open" | "closed";
 export type SocketHandle = {
   /** Returns false if the socket is not open (message dropped). */
   send(msg: unknown): boolean;
+  /** Send raw bytes (used for camera frames). Returns false if not open. */
+  sendBinary(data: Blob | ArrayBuffer): boolean;
   isOpen(): boolean;
   bufferedAmount(): number;
   close(): void;
@@ -10,6 +12,8 @@ export type SocketHandle = {
 
 type Handlers = {
   onMessage: (data: string) => void;
+  /** Called for binary messages (camera frames relayed to the laptop). */
+  onBinary?: (data: ArrayBuffer) => void;
   onState: (state: SocketState) => void;
 };
 
@@ -27,6 +31,7 @@ export function connectSocket(role: "phone" | "desktop", handlers: Handlers): So
     handlers.onState("connecting");
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(`${proto}//${location.host}/ws?role=${role}`);
+    ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
       attempts = 0;
@@ -34,6 +39,7 @@ export function connectSocket(role: "phone" | "desktop", handlers: Handlers): So
     };
     ws.onmessage = (ev) => {
       if (typeof ev.data === "string") handlers.onMessage(ev.data);
+      else if (ev.data instanceof ArrayBuffer) handlers.onBinary?.(ev.data);
     };
     ws.onclose = () => {
       handlers.onState("closed");
@@ -51,6 +57,11 @@ export function connectSocket(role: "phone" | "desktop", handlers: Handlers): So
     send(msg) {
       if (!ws || ws.readyState !== WebSocket.OPEN) return false;
       ws.send(JSON.stringify(msg));
+      return true;
+    },
+    sendBinary(data) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+      ws.send(data);
       return true;
     },
     isOpen: () => ws?.readyState === WebSocket.OPEN,

@@ -1,5 +1,6 @@
 import QRCode from "qrcode";
 import type {
+  Box,
   DesktopToServer,
   InfoResponse,
   ScanResultMessage,
@@ -9,9 +10,22 @@ import { connectSocket } from "../lib/socket";
 import { injectStyles } from "../lib/styles";
 
 const STALE_FRAME_MS = 2000;
-const BOX_DIM_AFTER_MS = 5000;
 const SCAN_TIMEOUT_MS = 20_000;
 const BASE_STORAGE_KEY = "deskcapade.phoneBase";
+const FRAME_HEADER_BYTES = 4; // width + height (uint16 each), then the JPEG
+
+// Object tracking: an object stays on screen until it is missed on this many scans in a row.
+const MISS_LIMIT = 3;
+const SMOOTHING = 0.35; // 0..1, higher = box snaps to new position faster
+
+/** A detected object that persists between scans. Boxes are normalized (0..1). */
+type Track = {
+  id: number;
+  label: string;
+  target: Box;
+  shown: Box;
+  misses: number;
+};
 
 /**
  * Laptop page: shows the phone's video with detection boxes on top.
@@ -46,6 +60,8 @@ export function mountDesktop(root: HTMLElement): () => void {
         <canvas id="view" width="800" height="450"></canvas>
         <div class="dc-banner dc-hidden" id="banner">Object detected!</div>
       </div>
+
+      <div class="dc-bar" id="objList" aria-live="polite"></div>
 
       <details class="dc-connect" id="connect" open>
         <summary>Connect your phone</summary>
@@ -82,6 +98,7 @@ export function mountDesktop(root: HTMLElement): () => void {
   const autoBox = q<HTMLInputElement>("#auto");
   const intervalSel = q<HTMLSelectElement>("#interval");
   const banner = q<HTMLElement>("#banner");
+  const objList = q<HTMLElement>("#objList");
   const toast = q<HTMLElement>("#toast");
   const connect = q<HTMLDetailsElement>("#connect");
   const qrImg = q<HTMLImageElement>("#qr");
@@ -94,15 +111,19 @@ export function mountDesktop(root: HTMLElement): () => void {
 
   let socketOpen = false;
   let phoneConnected = false;
-  let frameImg: HTMLImageElement | null = null;
+  let frameImg: ImageBitmap | null = null;
   let lastFrameAt = 0;
   let decoding = false;
+  let pendingFrame: ArrayBuffer | null = null;
   let lastResult: ScanResultMessage | null = null;
-  let lastResultAt = 0;
   let scanTimeout: number | undefined;
   let toastTimer: number | undefined;
   let stopped = false;
   let raf = 0;
+
+  let tracks: Track[] = [];
+  let nextTrackId = 1;
+  let listKey = "";
 
   // ---------- small UI helpers ----------
 
@@ -120,6 +141,29 @@ export function mountDesktop(root: HTMLElement): () => void {
     if (busy) scanTimeout = window.setTimeout(() => setScanning(false), SCAN_TIMEOUT_MS);
   };
 
+  /** The always-visible list of what is currently on screen. */
+  const renderObjects = (): void => {
+    const labels = tracks.map((t) => t.label);
+    const key = labels.join("|");
+    if (key !== listKey) {
+      listKey = key;
+      objList.replaceChildren(
+        ...labels.map((label) => {
+          const chip = document.createElement("span");
+          chip.className = "dc-chip on";
+          chip.textContent = label;
+          return chip;
+        }),
+      );
+    }
+
+    const count = tracks.length;
+    countChip.textContent = `${count} object${count === 1 ? "" : "s"}`;
+    countChip.className = count > 0 ? "dc-chip on" : "dc-chip";
+    banner.textContent = count > 0 ? `Detected: ${[...new Set(labels)].join(", ")}` : "";
+    banner.classList.toggle("dc-hidden", count === 0);
+  };
+
   const renderChips = (): void => {
     if (!socketOpen) {
       phoneText.textContent = "Server offline";
@@ -131,12 +175,65 @@ export function mountDesktop(root: HTMLElement): () => void {
       phoneText.textContent = "Waiting for phone";
       phoneChip.className = "dc-chip warn";
     }
-
-    const count = lastResult?.objects.length ?? 0;
-    countChip.textContent = `${count} object${count === 1 ? "" : "s"}`;
-    countChip.className = count > 0 ? "dc-chip on" : "dc-chip";
     latencyChip.textContent = lastResult ? `${lastResult.latencyMs} ms` : "– ms";
-    banner.classList.toggle("dc-hidden", count === 0);
+    renderObjects();
+  };
+
+  // ---------- object tracking ----------
+
+  const toNorm = (b: Box, s: { w: number; h: number }): Box => ({
+    x: b.x / s.w,
+    y: b.y / s.h,
+    w: b.w / s.w,
+    h: b.h / s.h,
+  });
+
+  const iou = (a: Box, b: Box): number => {
+    const x1 = Math.max(a.x, b.x);
+    const y1 = Math.max(a.y, b.y);
+    const x2 = Math.min(a.x + a.w, b.x + b.w);
+    const y2 = Math.min(a.y + a.h, b.y + b.h);
+    const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+    const union = a.w * a.h + b.w * b.h - inter;
+    return union > 0 ? inter / union : 0;
+  };
+
+  /** Match new detections to existing objects; drop an object only after several misses. */
+  const updateTracks = (res: ScanResultMessage): void => {
+    const matched = new Set<Track>();
+
+    for (const obj of res.objects) {
+      const box = toNorm(obj.box, res.imageSize);
+      const label = obj.label ?? "object";
+
+      let best: Track | null = null;
+      let bestScore = 0;
+      for (const t of tracks) {
+        if (matched.has(t)) continue;
+        const overlap = iou(t.target, box);
+        const sameLabel = t.label.toLowerCase() === label.toLowerCase();
+        if (overlap < 0.2 || (!sameLabel && overlap < 0.6)) continue;
+        const score = overlap + (sameLabel ? 0.3 : 0);
+        if (score > bestScore) {
+          best = t;
+          bestScore = score;
+        }
+      }
+
+      if (best) {
+        best.target = box;
+        best.label = label;
+        best.misses = 0;
+        matched.add(best);
+      } else {
+        const t: Track = { id: nextTrackId++, label, target: box, shown: { ...box }, misses: 0 };
+        tracks.push(t);
+        matched.add(t);
+      }
+    }
+
+    for (const t of tracks) if (!matched.has(t)) t.misses += 1;
+    tracks = tracks.filter((t) => t.misses < MISS_LIMIT);
   };
 
   // ---------- websocket ----------
@@ -151,27 +248,48 @@ export function mountDesktop(root: HTMLElement): () => void {
     send({ type: "autoscan", enabled: autoBox.checked, intervalMs: Number(intervalSel.value) });
   };
 
-  const decodeFrame = (image: string): void => {
-    if (decoding) return; // drop frames while one is still decoding
+  /**
+   * Frames arrive as binary: 4-byte header (width, height), then a JPEG.
+   * Decoded off the main thread; if one is decoding, only the newest waiting frame is kept.
+   */
+  const decodeFrame = (buf: ArrayBuffer): void => {
+    if (buf.byteLength <= FRAME_HEADER_BYTES) return;
+    if (decoding) {
+      pendingFrame = buf;
+      return;
+    }
     decoding = true;
-    const img = new Image();
-    img.onload = () => {
-      frameImg = img;
-      lastFrameAt = performance.now();
-      decoding = false;
-    };
-    img.onerror = () => {
-      decoding = false;
-    };
-    img.src = image;
+    createImageBitmap(new Blob([buf.slice(FRAME_HEADER_BYTES)], { type: "image/jpeg" }))
+      .then((bmp) => {
+        if (stopped) {
+          bmp.close();
+          return;
+        }
+        frameImg?.close();
+        frameImg = bmp;
+        lastFrameAt = performance.now();
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        decoding = false;
+        if (pendingFrame && !stopped) {
+          const next = pendingFrame;
+          pendingFrame = null;
+          decodeFrame(next);
+        }
+      });
   };
 
   const socket = connectSocket("desktop", {
     onState: (s) => {
       socketOpen = s === "open";
-      if (!socketOpen) phoneConnected = false;
+      if (!socketOpen) {
+        phoneConnected = false;
+        tracks = [];
+      }
       renderChips();
     },
+    onBinary: decodeFrame,
     onMessage: (raw) => {
       let msg: ServerToDesktop;
       try {
@@ -180,17 +298,15 @@ export function mountDesktop(root: HTMLElement): () => void {
         return;
       }
       switch (msg.type) {
-        case "frame":
-          decodeFrame(msg.image);
-          break;
         case "scanResult":
           lastResult = msg;
-          lastResultAt = performance.now();
+          updateTracks(msg);
           setScanning(false);
           renderChips();
           break;
         case "status":
           phoneConnected = msg.phoneConnected;
+          if (!phoneConnected) tracks = [];
           autoBox.checked = msg.autoscan;
           mockChip.classList.toggle("dc-hidden", !msg.mock);
           connect.open = !phoneConnected;
@@ -199,6 +315,8 @@ export function mountDesktop(root: HTMLElement): () => void {
         case "error":
           setScanning(false);
           showToast(msg.error);
+          break;
+        default:
           break;
       }
     },
@@ -213,37 +331,41 @@ export function mountDesktop(root: HTMLElement): () => void {
   // ---------- drawing ----------
 
   const drawLabel = (text: string, x: number, y: number): void => {
-    ctx.font = "600 14px system-ui, sans-serif";
-    const padX = 6;
+    ctx.font = "600 16px system-ui, sans-serif";
+    const padX = 8;
     const w = ctx.measureText(text).width + padX * 2;
-    const top = Math.max(0, y - 22);
+    const top = Math.max(0, y - 26);
     ctx.fillStyle = "#ffb870";
-    ctx.fillRect(x, top, w, 20);
+    ctx.fillRect(x, top, w, 24);
     ctx.fillStyle = "#2a1c0a";
     ctx.textBaseline = "middle";
-    ctx.fillText(text, x + padX, top + 10);
+    ctx.textAlign = "start";
+    ctx.fillText(text, x + padX, top + 12);
   };
 
-  const drawBoxes = (now: number): void => {
-    if (!lastResult) return;
-    const { objects, imageSize } = lastResult;
-    const sx = canvas.width / imageSize.w;
-    const sy = canvas.height / imageSize.h;
-
+  const drawBoxes = (): void => {
     ctx.save();
-    ctx.globalAlpha = now - lastResultAt > BOX_DIM_AFTER_MS ? 0.45 : 1;
     ctx.lineWidth = 3;
     ctx.strokeStyle = "#ffb870";
-    for (const obj of objects) {
-      const x = obj.box.x * sx;
-      const y = obj.box.y * sy;
-      const w = obj.box.w * sx;
-      const h = obj.box.h * sy;
+    for (const t of tracks) {
+      // glide the drawn box toward the latest detection so it doesn't jump
+      t.shown.x += (t.target.x - t.shown.x) * SMOOTHING;
+      t.shown.y += (t.target.y - t.shown.y) * SMOOTHING;
+      t.shown.w += (t.target.w - t.shown.w) * SMOOTHING;
+      t.shown.h += (t.target.h - t.shown.h) * SMOOTHING;
+
+      const x = t.shown.x * canvas.width;
+      const y = t.shown.y * canvas.height;
+      const w = t.shown.w * canvas.width;
+      const h = t.shown.h * canvas.height;
+
+      ctx.globalAlpha = t.misses > 0 ? 0.55 : 1; // fades slightly while it might be leaving
       ctx.beginPath();
       if (typeof ctx.roundRect === "function") ctx.roundRect(x, y, w, h, 6);
       else ctx.rect(x, y, w, h);
       ctx.stroke();
-      drawLabel(obj.label ?? "object", x, y);
+      ctx.globalAlpha = t.misses > 0 ? 0.55 : 1;
+      drawLabel(t.label, x, y);
     }
     ctx.restore();
   };
@@ -253,8 +375,8 @@ export function mountDesktop(root: HTMLElement): () => void {
     const hasFrame = frameImg !== null && now - lastFrameAt < STALE_FRAME_MS;
 
     if (frameImg) {
-      const w = frameImg.naturalWidth;
-      const h = frameImg.naturalHeight;
+      const w = frameImg.width;
+      const h = frameImg.height;
       if (w > 0 && (canvas.width !== w || canvas.height !== h)) {
         canvas.width = w;
         canvas.height = h;
@@ -276,7 +398,7 @@ export function mountDesktop(root: HTMLElement): () => void {
       ctx.textAlign = "start";
     }
 
-    drawBoxes(now);
+    drawBoxes();
     if (!stopped) raf = requestAnimationFrame(draw);
   };
   raf = requestAnimationFrame(draw);
@@ -391,6 +513,8 @@ export function mountDesktop(root: HTMLElement): () => void {
     window.clearTimeout(scanTimeout);
     window.clearTimeout(toastTimer);
     window.clearTimeout(infoTimer);
+    frameImg?.close();
+    frameImg = null;
     socket.close();
   };
 }

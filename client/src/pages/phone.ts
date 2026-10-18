@@ -1,12 +1,14 @@
-import type { FrameMessage, ServerToPhone } from "@deskcapade/shared";
+import type { ServerToPhone } from "@deskcapade/shared";
 import { connectSocket, type SocketState } from "../lib/socket";
 import { injectStyles } from "../lib/styles";
 
-const MIN_FRAME_INTERVAL_MS = 1000 / 15; // never faster than 15 fps
-const ACK_TIMEOUT_MS = 3000; // if an ack is lost, send again after this long
-const SLOW_RTT_MS = 400; // above this, drop to a smaller/lower-quality stream
-const FAST_RTT_MS = 150; // below this for a while, step back up
-const FAST_STREAK_TO_UPGRADE = 15;
+const MIN_FRAME_INTERVAL_MS = 1000 / 20; // never faster than 20 fps
+const MAX_IN_FLIGHT = 2; // 2 frames in flight hides network latency without piling up
+const ACK_TIMEOUT_MS = 2000; // if acks are lost, start fresh after this long
+const MAX_LOCAL_BUFFER_BYTES = 150_000; // our own uplink is backed up: skip frames
+const SLOW_RTT_MS = 350; // above this, drop to a smaller/lower-quality stream
+const FAST_RTT_MS = 120; // below this for a while, step back up
+const FAST_STREAK_TO_UPGRADE = 20;
 
 // Quality ladder: the phone moves along it automatically to match the connection.
 const LEVELS = [
@@ -19,9 +21,10 @@ const START_LEVEL = 1;
 /**
  * Phone page: only streams the camera. No detection happens here.
  *
- * Why it is not laggy: the phone keeps exactly ONE frame in flight. It sends a frame,
- * waits for the server's ack, then captures a brand-new frame. So frames can never pile
- * up in a network queue, and the laptop always sees the latest picture.
+ * Frames are sent as binary websocket messages: a 4-byte header (width, height as
+ * little-endian uint16) followed by the raw JPEG. Up to MAX_IN_FLIGHT frames are
+ * outstanding; each ack frees a slot and the next frame is captured fresh at that
+ * moment, so the laptop always sees a recent picture.
  */
 export function mountPhone(root: HTMLElement): () => void {
   injectStyles();
@@ -49,11 +52,12 @@ export function mountPhone(root: HTMLElement): () => void {
   let desktopConnected = false;
   let facing: "environment" | "user" = "environment";
   let stream: MediaStream | null = null;
+  let stopped = false;
 
   // flow control + adaptive quality
-  let inFlight = false;
-  let sentAt = 0;
+  let sentTimes: number[] = []; // send time of each un-acked frame, oldest first
   let lastSentAt = 0;
+  let encoding = false;
   let level = START_LEVEL;
   let rttEma = 0;
   let fastStreak = 0;
@@ -83,9 +87,9 @@ export function mountPhone(root: HTMLElement): () => void {
   };
 
   const onAck = (): void => {
-    if (!inFlight) return;
-    inFlight = false;
-    const rtt = performance.now() - sentAt;
+    const sent = sentTimes.shift();
+    if (sent === undefined) return;
+    const rtt = performance.now() - sent;
     rttEma = rttEma === 0 ? rtt : rttEma * 0.7 + rtt * 0.3;
 
     if (rttEma > SLOW_RTT_MS && level > 0) {
@@ -115,7 +119,7 @@ export function mountPhone(root: HTMLElement): () => void {
       socketState = s;
       if (s !== "open") {
         desktopConnected = false;
-        inFlight = false; // a reconnect starts clean
+        sentTimes = []; // a reconnect starts clean
       }
       renderStatus();
     },
@@ -151,7 +155,12 @@ export function mountPhone(root: HTMLElement): () => void {
     }
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: {
+          facingMode: { ideal: facing },
+          width: { ideal: 960 },
+          height: { ideal: 540 },
+          frameRate: { ideal: 30 },
+        },
         audio: false,
       });
       video.srcObject = stream;
@@ -171,43 +180,64 @@ export function mountPhone(root: HTMLElement): () => void {
     void startCamera();
   });
 
-  // ---------- frame streaming (one frame in flight) ----------
+  // ---------- frame streaming ----------
 
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
 
   const sendFrame = (): void => {
-    if (!ctx || !socket.isOpen() || video.readyState < 2 || video.videoWidth === 0) return;
+    if (!ctx || encoding || !socket.isOpen() || video.readyState < 2 || video.videoWidth === 0) {
+      return;
+    }
+    if (socket.bufferedAmount() > MAX_LOCAL_BUFFER_BYTES) return;
 
     const now = performance.now();
-    if (inFlight) {
-      if (now - sentAt < ACK_TIMEOUT_MS) return;
-      inFlight = false; // ack never came back: stop waiting
-    }
+    if (sentTimes.length > 0 && now - sentTimes[0]! > ACK_TIMEOUT_MS) sentTimes = [];
+    if (sentTimes.length >= MAX_IN_FLIGHT) return;
     if (now - lastSentAt < MIN_FRAME_INTERVAL_MS) return;
 
     const cfg = LEVELS[level]!;
     const scale = Math.min(1, cfg.width / video.videoWidth);
     const width = Math.round(video.videoWidth * scale);
     const height = Math.round(video.videoHeight * scale);
-    canvas.width = width;
-    canvas.height = height;
-    ctx.drawImage(video, 0, 0, width, height);
-
-    const frame: FrameMessage = {
-      type: "frame",
-      image: canvas.toDataURL("image/jpeg", cfg.quality),
-      width,
-      height,
-    };
-    if (socket.send(frame)) {
-      inFlight = true;
-      sentAt = now;
-      lastSentAt = now;
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
     }
+    ctx.drawImage(video, 0, 0, width, height);
+    lastSentAt = now;
+    encoding = true;
+
+    // Binary frame: 4-byte header (width, height) + raw JPEG. No base64.
+    canvas.toBlob(
+      (blob) => {
+        encoding = false;
+        if (!blob || stopped) return;
+        const header = new ArrayBuffer(4);
+        const view = new DataView(header);
+        view.setUint16(0, width, true);
+        view.setUint16(2, height, true);
+        if (socket.sendBinary(new Blob([header, blob]))) sentTimes.push(performance.now());
+      },
+      "image/jpeg",
+      cfg.quality,
+    );
   };
 
-  const frameTimer = window.setInterval(sendFrame, 25);
+  // Send on every new camera frame when the browser supports it; otherwise use a short timer.
+  let timer: number | undefined;
+  const loop = (): void => {
+    if (stopped) return;
+    sendFrame();
+    if (typeof video.requestVideoFrameCallback === "function") {
+      video.requestVideoFrameCallback(loop);
+    } else {
+      timer = window.setTimeout(loop, 20);
+    }
+  };
+  loop();
+  // Safety net: if the video callback ever stalls (e.g. after a camera restart), keep things moving.
+  const watchdog = window.setInterval(sendFrame, 100);
 
   // ---------- keep the screen awake ----------
 
@@ -230,7 +260,9 @@ export function mountPhone(root: HTMLElement): () => void {
 
   // Called by the router when you leave this page.
   return () => {
-    window.clearInterval(frameTimer);
+    stopped = true;
+    window.clearTimeout(timer);
+    window.clearInterval(watchdog);
     document.removeEventListener("visibilitychange", onVisible);
     void wakeLock?.release().catch(() => undefined);
     stream?.getTracks().forEach((t) => t.stop());
