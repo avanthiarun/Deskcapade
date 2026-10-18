@@ -127,6 +127,14 @@ const CSS = `
 .gm-charbtn canvas { width: 48px; image-rendering: pixelated; }
 .gm-charbtn[aria-pressed="true"] { background: var(--mint); outline: 3px solid var(--gold); outline-offset: 1px; }
 .gm-charbtn:hover { filter: brightness(1.05); }
+.gm-charphoto { background: var(--gold); }
+.gm-photoicon { display: grid; place-items: center; width: 48px; height: 57px; font-size: 30px; }
+.gm-photo-stage { display: grid; place-items: center; min-height: 240px; margin-top: 12px; padding: 14px; background: #1d140b; border: 3px solid var(--ink); }
+.gm-photo-stage canvas { display: block; max-width: 100%; max-height: 46dvh; }
+.gm-photo-status { font-size: 16px; text-align: center; }
+.gm-photo-made { display: grid; justify-items: center; gap: 12px; text-align: center; }
+.gm-photo-made canvas { width: 112px; image-rendering: pixelated; }
+.gm-photo-made h3 { font-size: 13px; color: var(--mint); }
 
 /* ---------- play screens ---------- */
 .gm-topbar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; padding: 14px 20px; }

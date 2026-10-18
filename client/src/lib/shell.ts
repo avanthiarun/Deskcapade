@@ -1,4 +1,5 @@
-import { CHARACTERS, drawSprout, getCharacter, setCharacter } from "../game/art";
+import { allCharacters, drawSprout, getCharacter, setCharacter } from "../game/art";
+import { openPhotoCharacter } from "./photoCharacter";
 import type { ObjectKind } from "../game/materials";
 import { drawCoin, drawGoalFlag, drawPiece, tonesOf } from "../game/pieces";
 import { ROUTES } from "./routes";
@@ -132,32 +133,61 @@ export function bindCharacterPicker(root: HTMLElement): void {
   for (const btn of root.querySelectorAll<HTMLElement>("[data-characters]")) {
     btn.addEventListener("click", () => {
       const wrap = document.createElement("div");
-      wrap.innerHTML = `
-        <div class="gm-modal" role="dialog" aria-modal="true" aria-labelledby="charTitle">
-          <div class="gm-panel" style="width: min(640px, 100%)">
-            <h2 id="charTitle">Choose your character</h2>
-            <div class="gm-chargrid">
-              ${CHARACTERS.map(
+      wrap.innerHTML = `<div class="gm-modal" role="dialog" aria-modal="true" aria-labelledby="charTitle"><div class="gm-panel" style="width: min(680px, 100%)"></div></div>`;
+      const modal = wrap.firstElementChild as HTMLElement;
+      const panel = modal.firstElementChild as HTMLElement;
+      let stopPhoto: (() => void) | null = null;
+
+      const refreshPage = (): void => {
+        for (const c of root.querySelectorAll<HTMLCanvasElement>('canvas[data-art="sprout"]')) paintArt(c.parentElement ?? root);
+        root.querySelectorAll("[data-charname]").forEach((el) => (el.textContent = getCharacter().name));
+      };
+      const close = (): void => {
+        stopPhoto?.();
+        modal.remove();
+      };
+      const showGrid = (): void => {
+        stopPhoto?.();
+        stopPhoto = null;
+        panel.innerHTML = `
+          <h2 id="charTitle">Choose your character</h2>
+          <div class="gm-chargrid">
+            ${allCharacters()
+              .map(
                 (c) => `<button class="gm-charbtn" type="button" data-pick="${c.id}" aria-pressed="${c.id === getCharacter().id}">
                   <canvas class="gm-bob" data-art="char:${c.id}" aria-hidden="true"></canvas><span>${c.name}</span></button>`,
-              ).join("")}
-            </div>
-            <div class="gm-modal-actions"><button class="gm-btn small green" type="button" data-close>Done</button></div>
+              )
+              .join("")}
+            <button class="gm-charbtn gm-charphoto" type="button" data-photo><span class="gm-photoicon">📷</span><span>From a photo</span></button>
           </div>
-        </div>`;
-      const modal = wrap.firstElementChild as HTMLElement;
-      paintArt(modal);
+          <div class="gm-modal-actions"><button class="gm-btn small green" type="button" data-close>Done</button></div>`;
+        paintArt(panel);
+      };
+
       modal.addEventListener("click", (e) => {
         const target = e.target as HTMLElement;
         const pick = target.closest<HTMLElement>("[data-pick]");
         if (pick) {
           setCharacter(pick.dataset.pick ?? "");
-          modal.querySelectorAll<HTMLElement>("[data-pick]").forEach((b) => b.setAttribute("aria-pressed", String(b === pick)));
-          for (const c of root.querySelectorAll<HTMLCanvasElement>('canvas[data-art="sprout"]')) paintArt(c.parentElement ?? root);
-          root.querySelectorAll("[data-charname]").forEach((el) => (el.textContent = getCharacter().name));
+          panel.querySelectorAll<HTMLElement>("[data-pick]").forEach((b) => b.setAttribute("aria-pressed", String(b === pick)));
+          refreshPage();
         }
-        if (e.target === modal || target.closest("[data-close]")) modal.remove();
+        if (target.closest("[data-photo]")) {
+          // snap a toy -> Perceptron says what it is -> Gemini draws it as a character
+          stopPhoto = openPhotoCharacter(
+            panel,
+            (made) => {
+              setCharacter(made.id);
+              refreshPage();
+              close();
+            },
+            showGrid,
+          );
+        }
+        if (e.target === modal || target.closest("[data-close]")) close();
       });
+      modal.addEventListener("paint", () => paintArt(panel));
+      showGrid();
       root.querySelector(".gm")?.appendChild(modal);
     });
   }
@@ -175,6 +205,29 @@ export function bestChallengeMs(): number | null {
     /* storage unavailable */
   }
   return best;
+}
+
+const POINTS_KEY = "deskcapade.points";
+
+/** Your points from every Challenge course you've played (they keep adding up). */
+export function getPoints(): number {
+  try {
+    const v = Number(localStorage.getItem(POINTS_KEY));
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Add points; returns the new total. */
+export function addPoints(n: number): number {
+  const total = getPoints() + n;
+  try {
+    localStorage.setItem(POINTS_KEY, String(total));
+  } catch {
+    /* storage unavailable: still shown for this visit */
+  }
+  return total;
 }
 
 export const formatTime = (ms: number): string => {

@@ -1,7 +1,9 @@
 import type { Server as HttpServer } from "node:http";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import type {
+  DesktopToServer,
   ErrorMessage,
+  FreezeMessage,
   PhoneToServer,
   SnapMessage,
   ScanResultMessage,
@@ -21,8 +23,8 @@ const FRAME_HEADER_BYTES = 4;
 
 // Detection runs automatically while a phone and a Story page are connected. Each scan takes a few
 // seconds, so they overlap: a new one starts every SCAN_START_EVERY_MS, at most MAX_SCANS_IN_FLIGHT at once.
-const SCAN_START_EVERY_MS = 1200; // 50 scans a minute
-const MAX_SCANS_IN_FLIGHT = 5; // each scan takes 4-6 s, so ~5 overlap at this pace
+const SCAN_START_EVERY_MS = 1500; // 40 scans a minute
+const MAX_SCANS_IN_FLIGHT = 4; // each scan takes 4-6 s, so ~4 overlap at this pace
 // After a failed scan (rate limit, network), wait longer before trying again.
 const ERROR_BACKOFF_MS = 2000;
 
@@ -58,6 +60,8 @@ export function attachRelay(server: HttpServer): void {
 
   let latestFrame: LatestFrame | null = null;
   let lastScannedFrame: LatestFrame | null = null;
+  /** The Story page froze the desk (keep playing the current setup; no scanning meanwhile). */
+  let frozen = false;
   let inFlight = 0;
   let scanSeq = 0;
   let newestSent = 0;
@@ -88,7 +92,13 @@ export function attachRelay(server: HttpServer): void {
       mock: config.mock,
     };
     // desktops that don't scan the stream are Challenge pages: they take photos, so the phone can snap
-    const toPhone: ServerToPhone = { type: "status", desktopConnected: desktops.size > 0, canSnap: desktops.size > scanners.size };
+    const toPhone: ServerToPhone = {
+      type: "status",
+      desktopConnected: desktops.size > 0,
+      canSnap: desktops.size > scanners.size,
+      canFreeze: scanners.size > 0,
+      frozen,
+    };
     for (const ws of desktops) sendJson(ws, toDesktop);
     for (const ws of phones) sendJson(ws, toPhone);
   }
@@ -132,7 +142,8 @@ export function attachRelay(server: HttpServer): void {
       });
   }
 
-  const shouldScan = (): boolean => scanners.size > 0 && phones.size > 0;
+  // a frozen desk keeps its pieces, so there's nothing to scan for
+  const shouldScan = (): boolean => scanners.size > 0 && phones.size > 0 && !frozen;
 
   function tick(gen: number): void {
     if (gen !== loopGen) return;
@@ -178,6 +189,10 @@ export function attachRelay(server: HttpServer): void {
           // the phone's Snap button: pass it to the Challenge pages (the ones not scanning)
           try {
             const msg = JSON.parse(toBuffer(data).toString("utf8")) as PhoneToServer;
+            if (msg.type === "freeze") {
+              // the phone's Freeze button: the Story pages toggle and report back ("frozen")
+              for (const desk of scanners) sendJson(desk, { type: "freeze" } satisfies FreezeMessage);
+            }
             if (msg.type === "snap") {
               let sent = false;
               for (const desk of desktops) {
@@ -218,10 +233,24 @@ export function attachRelay(server: HttpServer): void {
     } else if (role === "desktop") {
       desktops.add(ws);
       if (url.searchParams.get("scan") !== "0") scanners.add(ws);
-      // Desktops only watch: they send nothing the server needs to act on.
+      // Story pages report when the desk is frozen (the phone shows it; scanning pauses meanwhile)
+      ws.on("message", (data: RawData, isBinary: boolean) => {
+        if (isBinary) return;
+        try {
+          const msg = JSON.parse(toBuffer(data).toString("utf8")) as DesktopToServer;
+          if (msg.type === "frozen" && scanners.has(ws)) {
+            frozen = msg.frozen;
+            syncScanLoop();
+            broadcastStatus();
+          }
+        } catch {
+          /* ignore malformed messages */
+        }
+      });
       ws.on("close", () => {
         desktops.delete(ws);
         scanners.delete(ws);
+        if (scanners.size === 0) frozen = false;
         syncScanLoop(); // stops scanning when nobody is watching
         broadcastStatus();
       });

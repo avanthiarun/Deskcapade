@@ -96,6 +96,8 @@ export function groundSegments(m: Metrics, hazards: readonly Hazard[]): Surface[
 
 /** Things you can stand on at the start or goal (not the inside of pools, not slides). */
 const standable = (s: Surface): boolean => s.kind !== "floor" && s.kind !== "slide" && !s.bounce;
+/** ...with room for your head above it (objects can reach the very top of the photo). */
+const roomy = (m: Metrics, s: Surface): boolean => s.kind === "ground" || s.y >= m.playerH + 2 * m.u;
 
 /** The surface top nearest to (x, y), within `range` vertically. */
 function snapTo(surfaces: readonly Surface[], x: number, y: number, range: number): { x: number; y: number } | null {
@@ -150,7 +152,7 @@ export function finalizeCourse(
   }
 
   // ---------- start ----------
-  const plain = [...groundSegments(m, []), ...objectSurfaces, ...ledges];
+  const plain = [...groundSegments(m, []), ...objectSurfaces, ...ledges].filter((s) => roomy(m, s));
   const ds = design.start ?? { x: 6 * u, y: groundY };
   const start =
     (finite(ds.x) && finite(ds.y) ? snapTo(plain, clamp(ds.x, 2 * u, W - 2 * u), ds.y, 15 * u) : null) ?? { x: 6 * u, y: groundY };
@@ -168,7 +170,7 @@ export function finalizeCourse(
   }
   if (!goal || Math.hypot(goal.x - start.x, goal.y - start.y) < 20 * u) {
     // fall back to the top of the desk object farthest from the start
-    const tops = objectSurfaces.filter(standable);
+    const tops = objectSurfaces.filter((s) => standable(s) && roomy(m, s));
     const far = tops.sort((a, b) => Math.abs((b.x1 + b.x2) / 2 - start.x) - Math.abs((a.x1 + a.x2) / 2 - start.x))[0];
     goal = far ? { x: (far.x1 + far.x2) / 2, y: far.y } : { x: start.x < W / 2 ? W - 6 * u : 6 * u, y: groundY };
   }
@@ -204,8 +206,12 @@ export function finalizeCourse(
   ledges.push(...path.added);
   if (!path.reached) {
     // last resort: the flag moves to the highest spot that can be reached
-    const r = canReach(m, [...groundSegments(m, hazards), ...objectSurfaces, ...ledges], lifts, spotAt(m, start), spotAt(m, goal));
-    const top = r.spots.filter((s) => s.x2 - s.x1 > m.playerW).sort((a, b) => a.y - b.y)[0];
+    const all = [...groundSegments(m, hazards), ...objectSurfaces, ...ledges];
+    const r = canReach(m, all, lifts, spotAt(m, start), spotAt(m, goal));
+    // only real surfaces you can stand on, with room above (not the top of an updraft or a vine)
+    const isSurface = (sp: Spot): boolean =>
+      all.some((s) => Math.abs(s.x1 - sp.x1) < 1 && Math.abs(s.x2 - sp.x2) < 1 && standable(s) && roomy(m, s));
+    const top = r.spots.filter((s) => s.x2 - s.x1 > m.playerW && isSurface(s)).sort((a, b) => a.y - b.y)[0];
     if (top) goal = { x: (top.x1 + top.x2) / 2, y: top.y };
   }
 
@@ -247,7 +253,10 @@ export function finalizeCourse(
 
   // ---------- beetles: patrolling a stretch of ground or an object top, away from start and flag ----------
   const critters: Course["critters"] = [];
-  const walkable = surfaces.filter((sf) => standable(sf) && !sf.motion && !sf.crumble && sf.x2 - sf.x1 >= 10 * u);
+  // beetles only patrol wide stretches with plenty of room above, so you can always jump over or stomp them
+  const walkable = surfaces.filter(
+    (sf) => standable(sf) && !sf.motion && !sf.crumble && sf.x2 - sf.x1 >= 20 * u && (sf.kind === "ground" || sf.y >= m.playerH + m.jumpH * 0.7),
+  );
   const addCritter = (x: number, y: number): void => {
     const sf = walkable.find((w) => x >= w.x1 && x <= w.x2 && Math.abs(w.y - y) < 6 * u);
     if (!sf) return;
@@ -371,7 +380,7 @@ export function localDesign(m: Metrics, placed: readonly PlacedObject[], geo: Ge
   const rand = seeded(seed);
   const { u, W, groundY } = m;
   // somewhere to plant a flag: wide enough to stand on, and not hugging the top edge of the photo
-  const tops = geo.surfaces.filter((s) => standable(s) && s.x2 - s.x1 >= m.playerW * 1.5 && s.y >= 15 * u);
+  const tops = geo.surfaces.filter((s) => standable(s) && roomy(m, s) && s.x2 - s.x1 >= m.playerW * 1.5 && s.y >= 15 * u);
 
   // the flag: the highest object top (hard: a ledge above it), else high on one side
   const highest = [...tops].sort((a, b) => a.y - b.y)[0];

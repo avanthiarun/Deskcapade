@@ -1,5 +1,5 @@
 import QRCode from "qrcode";
-import type { InfoResponse, ServerToDesktop } from "@deskcapade/shared";
+import type { DesktopToServer, InfoResponse, ServerToDesktop } from "@deskcapade/shared";
 import { StoryGame } from "../game/storyGame";
 import { LiveSpriteLayer } from "../lib/liveSprites";
 import { matchInBackground, onMatched } from "../lib/matchObjects";
@@ -42,7 +42,8 @@ export function mountDesktop(root: HTMLElement): () => void {
 
   const layer = new LiveSpriteLayer();
   const story = new StoryGame(layer);
-  const ui = bindStoryUi(root, story, layer);
+  // the phone shows a Freeze button too: tell the server whenever the desk freezes or unfreezes
+  const ui = bindStoryUi(root, story, layer, (frozen) => socket.send({ type: "frozen", frozen } satisfies DesktopToServer));
   const stopMatching = onMatched(() => layer.refreshSprites());
   let socketOpen = false;
   let phoneConnected = false;
@@ -67,6 +68,10 @@ export function mountDesktop(root: HTMLElement): () => void {
   /** Frames arrive as binary: 4-byte header (width, height), then a JPEG. Only the newest waiting frame is kept. */
   const decodeFrame = (buf: ArrayBuffer): void => {
     if (buf.byteLength <= FRAME_HEADER_BYTES) return;
+    if (ui.isFrozen()) {
+      lastFrameAt = performance.now(); // frozen on purpose: don't dim the held picture
+      return;
+    }
     if (decoding) {
       pendingFrame = buf;
       return;
@@ -97,6 +102,7 @@ export function mountDesktop(root: HTMLElement): () => void {
   const socket = connectSocket("desktop", {
     onState: (s) => {
       socketOpen = s === "open";
+      if (socketOpen && ui.isFrozen()) socket.send({ type: "frozen", frozen: true } satisfies DesktopToServer); // after a reconnect
       if (!socketOpen) {
         phoneConnected = false;
         layer.clear();
@@ -112,6 +118,7 @@ export function mountDesktop(root: HTMLElement): () => void {
         return;
       }
       if (msg.type === "scanResult") {
+        if (ui.isFrozen()) return; // the desk is frozen: keep the pieces as they are
         // the server scanned a frame from about `latencyMs` ago: place boxes where the picture was then
         layer.update(msg.objects, msg.imageSize, layer.motion.at(performance.now() - msg.latencyMs - 60));
         matchInBackground(msg.objects.map((o) => o.label ?? "")); // unlisted things take the shape of the closest listed one
@@ -119,6 +126,8 @@ export function mountDesktop(root: HTMLElement): () => void {
         phoneConnected = msg.phoneConnected;
         if (!phoneConnected) layer.clear();
         renderStatus();
+      } else if (msg.type === "freeze") {
+        ui.toggleFreeze(); // the Freeze button on the phone
       } else if (msg.type === "error") {
         ui.toast(`The desk spotter hiccuped: ${msg.error}`);
       }
@@ -135,7 +144,7 @@ export function mountDesktop(root: HTMLElement): () => void {
         canvas.height = frameImg.height;
       }
       ctx.drawImage(frameImg, 0, 0, canvas.width, canvas.height);
-      layer.frame(ctx, freshFrame, now);
+      layer.frame(ctx, freshFrame && !ui.isFrozen(), now);
       freshFrame = false;
     } else {
       ctx.fillStyle = "#1d140b";

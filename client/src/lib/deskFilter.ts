@@ -1,6 +1,6 @@
 import type { Box, DetectedObject } from "@deskcapade/shared";
 import { findSpriteTemplate } from "./spriteDictionary";
-import { listedKind } from "../game/materials";
+import { listedKind, objectKind } from "../game/materials";
 
 /* ------------------------------------------------------------------
    Desk objects only: decide which detections are things ON the desk (foreground)
@@ -96,6 +96,15 @@ const clipBox = (b: Box, w: number, h: number): Box => {
   const x = Math.max(0, Math.min(w, b.x));
   const y = Math.max(0, Math.min(h, b.y));
   return { x, y, w: Math.max(0, Math.min(w, b.x + b.w) - x), h: Math.max(0, Math.min(h, b.y + b.h) - y) };
+};
+
+/** Overlap of two boxes: intersection over union. */
+const iou = (a: Box, b: Box): number => {
+  const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  const inter = ix * iy;
+  const union = a.w * a.h + b.w * b.h - inter;
+  return union > 0 ? inter / union : 0;
 };
 
 /** Fraction of `a` that lies inside `b`. */
@@ -266,7 +275,19 @@ export function pickDeskObjects(
     else kept.push(c);
   }
 
-  return { kept, skipped };
+  // one object detected twice ("mug" and "cup" boxes on the same mug) would draw two pieces on top
+  // of each other: keep the bigger box. Different things that merely overlap (a mug on a book) stay.
+  const deduped: DeskCandidate[] = [];
+  for (const c of [...kept].sort((a, b) => b.box.w * b.box.h - a.box.w * a.box.h)) {
+    const twin = deduped.find((k) => {
+      const overlap = iou(c.box, k.box);
+      const sameKind = objectKind(c.label) === objectKind(k.label);
+      return overlap > 0.6 || (sameKind && (overlap > 0.35 || coveredBy(c.box, k.box) > 0.8));
+    });
+    if (twin) skipped.push({ ...c, reason: "background" });
+    else deduped.push(c);
+  }
+  return { kept: deduped, skipped };
 }
 
 /* ------------------------------------------------------------------

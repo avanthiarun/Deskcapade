@@ -8,6 +8,7 @@ import type {
   ServerToDesktop,
 } from "@deskcapade/shared";
 import type { Course } from "../game/course";
+import { sceneZoom } from "../game/level";
 import { Platformer } from "../game/platformer";
 import { artPixelSize } from "../lib/artPixel";
 import { pickDeskObjects } from "../lib/deskFilter";
@@ -17,7 +18,8 @@ import { injectGameStyles } from "../lib/gameStyles";
 import { drawPixelBackdrop } from "../lib/pixelBackdrop";
 import { playPixelTransition, type PixelTransition } from "../lib/pixelTransition";
 import { ROUTES } from "../lib/routes";
-import { bindAbout, formatTime, paintArt, pauseOverlay, sceneryHTML } from "../lib/shell";
+import { addPoints, bindAbout, formatTime, getPoints, paintArt, pauseOverlay, sceneryHTML } from "../lib/shell";
+import { bindSoundToggle, music, sfx } from "../lib/sound";
 import { connectSocket } from "../lib/socket";
 
 const SNAP_WIDTH = 800; // the photo is scaled down to this width before it is sent
@@ -66,8 +68,10 @@ export function mountChallenge(root: HTMLElement): () => void {
             <div class="gm-stat"><small>COINS</small><b id="statCoins">–</b></div>
             <div class="gm-stat"><small id="statTimeLabel">TIME</small><b id="statTime">0.0s</b></div>
             <div class="gm-stat"><small>RESPAWNS</small><b id="statRespawns">0</b></div>
+            <div class="gm-stat"><small>POINTS</small><b id="statPoints">0</b></div>
           </div>
           <div class="gm-topbar-right">
+            <button class="gm-iconbtn" type="button" data-sound></button>
             <button class="gm-btn small cream" id="pauseBtn" type="button" disabled>❚❚ PAUSE</button>
             <button class="gm-iconbtn" type="button" data-about aria-label="What is Deskcapades?">?</button>
           </div>
@@ -141,6 +145,7 @@ export function mountChallenge(root: HTMLElement): () => void {
   `;
   paintArt(root);
   bindAbout(root);
+  bindSoundToggle(root);
 
   const q = <T extends HTMLElement>(sel: string): T => root.querySelector<T>(sel)!;
   const stage = q<HTMLElement>("#stage");
@@ -168,6 +173,8 @@ export function mountChallenge(root: HTMLElement): () => void {
   const statTime = q<HTMLElement>("#statTime");
   const statTimeLabel = q<HTMLElement>("#statTimeLabel");
   const statRespawns = q<HTMLElement>("#statRespawns");
+  const statPoints = q<HTMLElement>("#statPoints");
+  statPoints.textContent = String(getPoints());
   const toast = q<HTMLElement>("#toast");
 
   // ---------- state ----------
@@ -272,6 +279,7 @@ export function mountChallenge(root: HTMLElement): () => void {
   };
 
   const stopGame = (): void => {
+    music.stop();
     cancelAnimationFrame(gameRaf);
     detachGame?.();
     detachGame = null;
@@ -508,6 +516,8 @@ export function mountChallenge(root: HTMLElement): () => void {
   const pause = pauseOverlay(stage, {
     onChange: (paused) => {
       game?.setPaused(paused);
+      if (paused) music.stop();
+      else if (game) music.start();
       pauseBtn.textContent = paused ? "▶ RESUME" : "❚❚ PAUSE";
     },
     onRestart: () => game?.restart(),
@@ -540,7 +550,8 @@ export function mountChallenge(root: HTMLElement): () => void {
   const showCourseInfo = (course: Course, d: Difficulty): void => {
     setGoal(
       `${course.title.toUpperCase()}`,
-      `${course.intro ? `${course.intro} ` : ""}Grab all ${course.coins.length} coins, then reach the flag within ${formatTime(course.timeLimitMs)}, or start over.`,
+      `${course.intro ? `${course.intro} ` : ""}Grab all ${course.coins.length} coins, then reach the flag within ${formatTime(course.timeLimitMs)}, or start over. ` +
+        `Win for 5 points, or under ${formatTime(course.timeLimitMs / 2)} for 10!`,
     );
     const best = readBest(d);
     bestText.hidden = best === null;
@@ -563,7 +574,17 @@ export function mountChallenge(root: HTMLElement): () => void {
     const g = new Platformer({
       mode: "challenge",
       seed: Math.floor(Math.random() * 1e6),
+      onTimeUp: () => {
+        // ran out of time: no points, and the course starts over
+        showToast("⏰ Time's up! +0 points. Try again!");
+      },
       onWin: (ms) => {
+        // 10 points for a fast run (within half the time limit), 5 for any win
+        const limit = g.stats().limitMs ?? Infinity;
+        const fast = ms <= limit * 0.5;
+        const earned = fast ? 10 : 5;
+        statPoints.textContent = String(addPoints(earned));
+        showToast(fast ? `⚡ Lightning fast! +${earned} points` : `★ Course cleared! +${earned} points`);
         const best = readBest(d);
         const record = best === null || ms < best;
         if (record) {
@@ -577,7 +598,8 @@ export function mountChallenge(root: HTMLElement): () => void {
         bestText.textContent = record ? `🏆 New best on ${levelName(d)}: ${formatTime(ms)}!` : `Cleared in ${formatTime(ms)} · best ${formatTime(best ?? ms)}`;
       },
     });
-    g.setSize(W, H);
+    // a photo from further back has smaller objects: shrink the world (player, jumps) to match
+    g.setSize(W, H, sceneZoom(lastSprites.map((sp) => ({ x: 0, y: 0, w: sp.box.w * scale, h: sp.box.h * scale })), H));
     g.setObjects(
       lastSprites.map((sp, i) => ({
         id: `s${i}`,
@@ -617,6 +639,7 @@ export function mountChallenge(root: HTMLElement): () => void {
 
     game = g;
     detachGame = g.attachInput();
+    music.start();
     sceneEl.replaceChildren(view);
     restartBtn.hidden = false;
     pauseBtn.disabled = false;
@@ -721,6 +744,7 @@ export function mountChallenge(root: HTMLElement): () => void {
     busy = true;
     frozenShot = shot;
     snapBtn.disabled = true;
+    sfx("snap");
     try {
       let last = "";
       for (let i = 0; i < SCAN_ATTEMPT_WIDTHS.length; i++) {

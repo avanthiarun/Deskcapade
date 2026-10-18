@@ -251,6 +251,8 @@ export class LiveSpriteLayer {
   autoPixelWorld = true;
   /** Set to draw objects as something else (see ObjectArtHook). */
   objectArt: ObjectArtHook | null = null;
+  /** Called with every object (and where it is) before any of them is drawn: scenery that goes behind them all. */
+  beforeObjects: ((ctx: CanvasRenderingContext2D, items: { obj: LiveObject; rect: { x: number; y: number; w: number; h: number } }[]) => void) | null = null;
   private tracks: LiveTrack[] = [];
   private nextId = 1;
   private pending: { objects: DetectedObject[]; imageSize: { w: number; h: number }; pan: Pan } | null = null;
@@ -497,6 +499,17 @@ export class LiveSpriteLayer {
     const pan = this.motion.current;
 
     this.drawBackdrop(ctx, W, H, pan, now);
+
+    if (this.beforeObjects) {
+      const items = this.tracks
+        .filter((t) => t.sprite && t.leftAt === null)
+        .map((t) => {
+          const box = { x: (t.shown.x + pan.x) * W, y: (t.shown.y + pan.y) * H, w: t.shown.w * W, h: t.shown.h * H };
+          const obj: LiveObject = { id: t.id, label: t.label, templateId: t.templateId, colors: t.sprite!.colors, sprite: t.sprite!.canvas, box };
+          return { obj, rect: { x: Math.round(box.x), y: Math.round(box.y), w: Math.round(box.w), h: Math.round(box.h) } };
+        });
+      this.beforeObjects(ctx, items);
+    }
 
     ctx.save();
     ctx.imageSmoothingEnabled = false;

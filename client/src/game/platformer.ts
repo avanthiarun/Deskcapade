@@ -13,7 +13,7 @@ import {
 } from "./art";
 import type { CourseDesign, CourseObject, Difficulty } from "@deskcapade/shared";
 import { finalizeCourse, groundSegments, localDesign, type Course } from "./course";
-import { drawBeetle, drawCoin, drawGoalFlag, drawGroundSpikes, drawLedgeGhost, drawLavaPit, drawLedge, drawPiece, drawStartSign, tonesOf } from "./pieces";
+import { drawBeetle, drawCoin, drawGoalFlag, drawSlab, drawGroundSpikes, drawLedgeGhost, drawLavaPit, drawLedge, drawPiece, drawStartSign, tonesOf } from "./pieces";
 import {
   BRIDGE_SAG_U,
   GEYSER_ON_MS,
@@ -22,6 +22,8 @@ import {
   conveyorDir,
   geyserTime,
   makeHighClouds,
+  SLAB_THICK_U,
+  slabsUnder,
   metrics,
   objectGeometry,
   planFillers,
@@ -34,6 +36,7 @@ import {
   type Surface,
 } from "./level";
 import { objectKind, type ObjectKind } from "./materials";
+import { sfx } from "../lib/sound";
 
 /* ------------------------------------------------------------------
    The garden platformer. You're a little garden sprite; the desk objects on screen are
@@ -110,6 +113,8 @@ export type PlatformerOptions = {
   seed?: number;
   /** Challenge: every seed collected, in `ms` since the first move. */
   onWin?: (ms: number) => void;
+  /** Challenge: the clock ran out (the course starts over). */
+  onTimeUp?: () => void;
   /** Bouncy clouds in the sky (on by default; Story turns them off: only your desk pieces are solid). */
   clouds?: boolean;
 };
@@ -143,6 +148,8 @@ export class Platformer {
   /** Challenge beetles: where each one is, which way it walks, and until when it's knocked out. */
   private bugs: { id: string; x1: number; x2: number; y: number; x: number; dir: 1 | -1; outUntil: number }[] = [];
   private paused = false;
+  /** World scale (see setSize). */
+  private zoom = 1;
   /** Challenge: when the clock last ran out (shows "Time's up!"). */
   private timeUpAt = -Infinity;
   /** Story: how many times the garden has bloomed (every seed collected). */
@@ -169,12 +176,25 @@ export class Platformer {
   /* ---------- setup ---------- */
 
   /** Match the canvas size (cheap when unchanged). */
-  setSize(W: number, H: number): void {
-    if (W === this.m.W && H === this.m.H) return;
-    this.m = metrics(W, H, PHYSICS);
+  /**
+   * Match the canvas size (cheap when unchanged). `zoom` scales the whole world (player, jumps,
+   * pixel size) to how big the objects look: see sceneZoom.
+   */
+  setSize(W: number, H: number, zoom = this.zoom): void {
+    if (W === this.m.W && H === this.m.H && zoom === this.zoom) return;
+    const rescale = W === this.m.W && H === this.m.H; // only the zoom changed: keep the player's spot
+    const keep = { x: this.player.x / this.m.W, y: this.player.y / this.m.H };
+    this.zoom = zoom;
+    this.m = metrics(W, H, PHYSICS, zoom);
     this.p = artPixel(this.m.u);
     this.newClouds();
     this.player = this.spawn();
+    if (rescale) {
+      // same picture, new scale: stay where you were
+      this.player.x = keep.x * W;
+      this.player.y = Math.min(this.m.groundY, keep.y * H);
+      this.player.onGround = false;
+    }
   }
 
   /** The desk objects, in canvas pixels. Story calls this every frame; Challenge once. */
@@ -429,6 +449,8 @@ export class Platformer {
     // Challenge: out of time = start the course over
     if (this.course && this.wonMs === null && this.startedAt !== null && now - this.startedAt > this.course.timeLimitMs) {
       this.timeUpAt = now;
+      sfx("timeup");
+      this.opts.onTimeUp?.();
       this.restart();
     }
 
@@ -447,6 +469,7 @@ export class Platformer {
       if (this.got.has(s.id)) continue;
       if (Math.hypot(s.x - pl.x, s.y - 3 * this.p - (pl.y - this.m.playerH / 2)) < SEED_PICKUP_U * u) {
         this.got.add(s.id);
+        sfx(this.course ? "coin" : "seed");
         this.burst(s.x, s.y - 3 * this.p, ["#ffd84a", "#fff0a0", "#fff7e6"], 10, now);
       }
     }
@@ -460,6 +483,7 @@ export class Platformer {
     if (goal && atFlag && allCoins && this.wonMs === null) {
       this.wonMs = now - (this.startedAt ?? now);
       this.burst(goal.x, goal.y - 10 * u, ["#ffd84a", "#fff7e6", "#4a74e8", "#ff86a8"], 24, now);
+      sfx("win");
       this.opts.onWin?.(this.wonMs);
     }
     if (!this.course && spots.length > 0 && allCoins) {
@@ -468,6 +492,7 @@ export class Platformer {
         this.opts.onWin?.(this.wonMs);
       } else if (this.opts.mode === "story" && this.bloomAt === null) {
         this.bloomAt = now;
+        sfx("bloom");
       }
     }
 
@@ -495,6 +520,7 @@ export class Platformer {
       if (st.touchedAt !== null && now - st.touchedAt > CRUMBLE_MS) {
         st.touchedAt = null;
         st.goneUntil = now + REGROW_MS;
+        sfx("crumble");
         this.burst((f.x1 + f.x2) / 2, f.y, ["#8f5a32", "#6b4228", "#6ccf4a"], 10, now);
       }
       this.crumbles.set(f.id, st);
@@ -512,6 +538,7 @@ export class Platformer {
       if (!hit) continue;
       if (pl.vy > 0 && pl.y < b.y - bh + 1.5 * u) {
         b.outUntil = now + 5000; // stomped!
+        sfx("stomp");
         pl.vy = -JUMP_V * 0.8 * u;
         this.burst(b.x, b.y - bh, ["#b58cff", "#fff7e6", "#ffd84a"], 10, now);
         this.say("Stomp!", now);
@@ -566,12 +593,14 @@ export class Platformer {
 
   private ignite(now: number): void {
     const pl = this.player;
+    if (pl.fireUntil <= now) sfx("fire");
     if (pl.fireUntil <= now) this.say("Hot!", now);
     pl.fireUntil = now + FIRE_MS;
   }
 
   /** Back to the start: spikes, or burning for too long. */
   private respawn(now: number, word: string): void {
+    sfx(word === "Splash!" ? "splash" : "hurt");
     this.burst(this.player.x, this.player.y - this.m.playerH / 2, ["#fff7e6", "#c9cde0", "#ff86a8"], 14, now);
     this.say(word, now);
     this.player = this.spawn();
@@ -604,8 +633,10 @@ export class Platformer {
           if (inside(z)) water = z;
           break;
         case "lava":
-          if (touching(z) && pl.y > z.y1 + u && this.course) {
-            this.respawn(now, "Too hot!"); // Challenge lava: back to the start
+          // Challenge lava pits sit in the ground: standing at ground level over one is touching it
+          if (this.course && touching(z) && pl.y >= z.y1) {
+            this.burst(pl.x, z.y1, ["#ff8a2a", "#ffd84a", "#e8432e"], 12, now, true);
+            this.respawn(now, "Too hot!"); // back to the start
             return;
           }
           if (touching(z) && pl.y > z.y1 + u) {
@@ -711,6 +742,7 @@ export class Platformer {
       // icy patches: your feet just slide, there's no grip to jump from
       if (wantJump && !standingOn?.noJump && (pl.onGround || now - pl.lastGroundAt < COYOTE_MS || jello)) {
         pl.vy = -JUMP_V * (jello ? JELLO_JUMP : 1) * u;
+        sfx("jump");
         pl.hopping = true;
         pl.onGround = false;
         pl.lastGroundAt = -Infinity;
@@ -767,6 +799,7 @@ export class Platformer {
           pl.vy = -BOUNCE_V * land.bounce * (jumpHeld ? 1.08 : 1) * u;
           pl.hopping = false;
           this.bounceAt.set(land.owner ?? land.id, now);
+          sfx("bounce");
           this.burst(pl.x, landY, ["#fff7e6", "#ff86a8", "#ffd84a"], 6, now);
         } else {
           pl.vy = 0;
@@ -856,8 +889,33 @@ export class Platformer {
     ctx.restore();
   }
 
-  /** Challenge: draw every desk object as its garden piece. */
+  /**
+   * The slabs of land floating objects rest on (see slabsUnder). Draw them BEFORE the objects,
+   * so each object sits on top of its slab.
+   */
+  drawSlabs(ctx: CanvasRenderingContext2D, items: readonly { obj: GameObject; rect: Rect }[], now = performance.now()): void {
+    const p = this.p;
+    const u = this.m.u;
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    for (const { obj, rect } of items) {
+      if (rect.w < 2) continue;
+      // follow the drawn rect (it may be mid-animation), shaped like the physics slabs
+      const k = rect.w / Math.max(1, obj.box.w);
+      for (const sl of slabsUnder(obj.box, this.kindOf(obj), this.m)) {
+        const x1 = rect.x + (sl.x1 - obj.box.x) * k;
+        const x2 = rect.x + (sl.x2 - obj.box.x) * k;
+        const y = rect.y + (sl.y - obj.box.y) * (rect.h / Math.max(1, obj.box.h));
+        drawSlab(ctx, x1, x2, y, SLAB_THICK_U * u, p, now);
+      }
+    }
+    ctx.restore();
+  }
+
+  /** Challenge: draw every desk object as its garden piece (floating ones on their slab of land). */
   drawObjects(ctx: CanvasRenderingContext2D, now = performance.now()): void {
+    const rectOf = (o: GameObject): Rect => ({ x: Math.round(o.box.x), y: Math.round(o.box.y), w: Math.round(o.box.w), h: Math.round(o.box.h) });
+    this.drawSlabs(ctx, this.placed.map((o) => ({ obj: o, rect: rectOf(o) })), now);
     for (const o of this.placed) {
       const rect = { x: Math.round(o.box.x), y: Math.round(o.box.y), w: Math.round(o.box.w), h: Math.round(o.box.h) };
       this.drawObjectArt(ctx, o, rect, now);

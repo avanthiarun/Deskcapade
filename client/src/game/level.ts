@@ -102,8 +102,14 @@ export type Metrics = {
 const GROUND_STRIP_U = 2;
 export const CLOUD_BOUNCE = 0.8;
 
-export function metrics(W: number, H: number, physics: { gravity: number; jumpV: number; moveV: number; bounceV: number }): Metrics {
-  const u = H / 100;
+export function metrics(
+  W: number,
+  H: number,
+  physics: { gravity: number; jumpV: number; moveV: number; bounceV: number },
+  /** World scale: below 1 when the camera is far back (small objects), so everything fits roomily. */
+  zoom = 1,
+): Metrics {
+  const u = (H / 100) * zoom;
   const { gravity, jumpV, moveV, bounceV } = physics;
   return {
     W,
@@ -203,6 +209,49 @@ export function riverLayout(box: Box, u: number): { waterTop: number; stones: { 
   return { waterTop: stoneY + Math.max(1, u * 0.8), stones };
 }
 
+/** A close-up desk photo's typical object size (square root of its box area), as a share of the picture height. */
+const CLOSE_UP_SIZE = 0.22;
+const MIN_ZOOM = 0.5;
+
+/**
+ * How big the world should be drawn, from how big the objects look: a camera further back sees
+ * smaller objects, so the player, jumps and details shrink with them (down to half size).
+ * Rounded to steps of 0.05, so small wobbles in detection don't keep changing it.
+ */
+export function sceneZoom(boxes: readonly Box[], H: number): number {
+  if (boxes.length === 0 || H <= 0) return 1;
+  const sizes = boxes.map((b) => Math.sqrt(Math.max(1, b.w * b.h)) / H).sort((a, b) => a - b);
+  const median = sizes[Math.floor(sizes.length / 2)]!;
+  const zoom = Math.max(MIN_ZOOM, Math.min(1, median / CLOSE_UP_SIZE));
+  return Math.round(zoom * 20) / 20;
+}
+
+/** Pieces that span a gap: they rest on a little slab of land at each end instead of one under them. */
+const SPANS: ReadonlySet<ObjectKind> = new Set(["bridge", "woodbridge", "stonepath", "rail", "river"]);
+/** How thick a floating slab of land is, in u. */
+export const SLAB_THICK_U = 5;
+
+/**
+ * Platformer-style ground for floating objects: anything above the ground rests on a grassy
+ * slab of land (a little wider than it, so its edges are ledges you can stand on), like the
+ * floating islands in Super Mario. Spans (bridges, rails, rivers) get a small slab at each end.
+ * Objects sitting on the ground get none.
+ */
+export function slabsUnder(box: Box, kind: ObjectKind, m: Metrics): { x1: number; x2: number; y: number }[] {
+  const base = box.y + box.h;
+  if (base >= m.groundY - 4 * m.u) return [];
+  if (SPANS.has(kind)) {
+    const w = Math.min(10 * m.u, Math.max(5 * m.u, box.w * 0.25));
+    const top = kind === "stonepath" || kind === "river" ? base : box.y + Math.min(box.h, 2 * m.u);
+    return [
+      { x1: box.x - 2 * m.u, x2: box.x - 2 * m.u + w, y: top },
+      { x1: box.x + box.w + 2 * m.u - w, x2: box.x + box.w + 2 * m.u, y: top },
+    ];
+  }
+  const lip = Math.max(m.u, Math.min(4 * m.u, box.w * 0.12));
+  return [{ x1: box.x - lip, x2: box.x + box.w + lip, y: base }];
+}
+
 /** The leaf pad on a vine is at least this wide (in u) so it's easy to land on. */
 const MIN_PAD_HALF_U = 3;
 export const vinePadHalf = (box: Box, m: Metrics): number => Math.max(MIN_PAD_HALF_U * m.u, box.w / 2);
@@ -228,6 +277,8 @@ export function objectGeometry(objects: readonly PlacedObject[], m: Metrics): Ge
     const bottom = b.y + b.h;
     const cx = b.x + b.w / 2;
     const id = o.id;
+    // floating objects rest on a slab of land, whose edges are ledges too
+    slabsUnder(b, o.kind, m).forEach((sl, i) => g.surfaces.push({ id: `${id}:slab${i}`, kind: "top", ...sl, owner: id }));
     const top = (extra: Partial<Surface> = {}): void => {
       g.surfaces.push({ id: `${id}:top`, kind: "top", x1: b.x, x2: right, y: b.y, owner: id, ...extra });
     };
@@ -408,6 +459,8 @@ function walk(m: Metrics, surfaces: readonly Surface[], lifts: readonly Lift[], 
     reached.spots.push(from);
     for (const s of surfaces) {
       const spot = { x1: s.x1, x2: s.x2, y: Math.min(s.y, surfaceY(s, s.x2)), ...(s.bounce ? { bounce: s.bounce } : {}) };
+      // right at the top of the screen there's no room for your head: you can't stand there
+      if (spot.y < m.playerH + m.u && s.kind !== "ground") continue;
       if (reached.surfaces.has(s.id) || !canJump(m, from, spot)) continue;
       reached.surfaces.add(s.id);
       queue.push(spot);
@@ -478,6 +531,7 @@ export function planPath(
   const { u, W } = m;
   const HALF = 6 * u;
   const added: Surface[] = [];
+  let stuck = 0;
   for (let iter = 0; iter < maxAdd; iter++) {
     const all = [...surfaces, ...added];
     const r = canReach(m, all, lifts, start, goal);
@@ -500,8 +554,12 @@ export function planPath(
     const tx = (goal.x1 + goal.x2) / 2;
     const sx = Math.max(from.x1, Math.min(from.x2, tx));
     const higher = from.y - goal.y > step;
-    // up: straight above, the next row higher. Across: the same row, a step toward the goal.
-    let y = Math.max(8 * u, higher ? rowY(m, from.y - step, spacing) : rowY(m, from.y, spacing));
+    // up: straight above, one row higher (never further than a jump: snap to the row at or below
+    // a full step up). Across: the same row, a step toward the goal.
+    const rowAtOrBelow = (y: number): number => m.groundY - Math.max(1, Math.floor((m.groundY - y) / step + 1e-6)) * step;
+    // never so high there's no room for your head
+    const minY = m.playerH + 2 * u;
+    let y = Math.max(minY, higher ? rowAtOrBelow(from.y - step) : rowY(m, from.y, spacing));
     const maxDx = m.reach * spacing * 0.8;
     // stacking on a ledge (or anything narrow): centered right above it, so the rows form a column
     const narrow = from.x2 - from.x1 <= HALF * 3;
@@ -509,6 +567,7 @@ export function planPath(
     let x = higher ? above : sx + Math.max(-maxDx, Math.min(maxDx, tx - sx));
     let placed = false;
     for (const ny of [0, -step]) {
+      if (y + ny < minY) continue;
       for (const n of [0, -1, 1, -2, 2]) {
         const nx = Math.max(HALF, Math.min(W - HALF, x + n * HALF * 2)); // shift by whole ledge widths, keeping columns
         if (!blocked(m, nx - HALF, nx + HALF, y + ny, boxes, all)) {
@@ -520,6 +579,12 @@ export function planPath(
       }
       if (placed) break;
     }
+    if (!placed) {
+      // nowhere free to put it: don't stack a ledge inside another one
+      if (++stuck >= 3) break;
+      continue;
+    }
+    stuck = 0;
     added.push({ id: `ledge${iter}`, kind: "ledge", x1: x - HALF, x2: x + HALF, y });
   }
   return { added, reached: canReach(m, [...surfaces, ...added], lifts, start, goal).ok };

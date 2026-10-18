@@ -2,6 +2,7 @@ import type { StoryGame } from "../game/storyGame";
 import type { LiveSpriteLayer } from "../lib/liveSprites";
 import { ROUTES } from "../lib/routes";
 import { bindAbout, paintArt, pauseOverlay, sceneryHTML } from "../lib/shell";
+import { bindSoundToggle, music } from "../lib/sound";
 
 /**
  * The in-game screen shared by both Story pages: top bar (home, mode, seeds, blooms, pause),
@@ -23,6 +24,8 @@ export function storyLayoutHTML(extraSide = ""): string {
             <div class="gm-stat"><small>BLOOMS</small><b id="statBlooms">0</b></div>
           </div>
           <div class="gm-topbar-right">
+            <button class="gm-iconbtn" type="button" data-sound></button>
+            <button class="gm-btn small blue" id="freezeBtn" type="button" title="Keep this desk setup: stop updating from the camera (F)">❄ FREEZE</button>
             <button class="gm-btn small cream" id="pauseBtn" type="button">❚❚ PAUSE</button>
             <button class="gm-iconbtn" type="button" data-about aria-label="What is Deskcapades?">?</button>
           </div>
@@ -43,6 +46,7 @@ export function storyLayoutHTML(extraSide = ""): string {
               <h3>CONTROLS</h3>
               <p><span class="gm-kbd">← →</span> walk · <span class="gm-kbd">Space</span> jump</p>
               <p><span class="gm-kbd">↑ ↓</span> climb · <span class="gm-kbd">R</span> respawn · <span class="gm-kbd">P</span> pause</p>
+              <p><span class="gm-kbd">F</span> freeze your desk setup (keep playing it as is)</p>
             </section>
             <section class="gm-panel">
               <h3>OPTIONS</h3>
@@ -69,19 +73,40 @@ export function bindStoryUi(
   root: HTMLElement,
   story: StoryGame,
   layer: LiveSpriteLayer,
-): { refresh: () => void; showMessage: (html: string | null) => void; toast: (text: string) => void; dispose: () => void } {
+  /** Hears every freeze / unfreeze (the phone page mirrors it). */
+  onFreezeChange?: (frozen: boolean) => void,
+): {
+  refresh: () => void;
+  showMessage: (html: string | null) => void;
+  toast: (text: string) => void;
+  /** Frozen: hold the current picture and desk pieces, stop updating from the camera. */
+  isFrozen: () => boolean;
+  /** Freeze / unfreeze (e.g. from the phone's button). */
+  toggleFreeze: () => void;
+  dispose: () => void;
+} {
   paintArt(root);
   bindAbout(root);
+  bindSoundToggle(root);
+  music.start();
   const q = <T extends HTMLElement>(sel: string): T => root.querySelector<T>(sel)!;
   const pixelToggle = q<HTMLButtonElement>("#pixelToggle");
   const gameToggle = q<HTMLButtonElement>("#gameToggle");
   const pauseBtn = q<HTMLButtonElement>("#pauseBtn");
+  const freezeBtn = q<HTMLButtonElement>("#freezeBtn");
+  let frozen = false;
   const seedsEl = q<HTMLElement>("#statSeeds");
   const bloomsEl = q<HTMLElement>("#statBlooms");
   const stageMsg = q<HTMLElement>("#stageMsg");
   const stageMsgBody = q<HTMLElement>("#stageMsgBody");
   const toastEl = q<HTMLElement>("#toast");
   let toastTimer: number | undefined;
+  const showToastNow = (text: string): void => {
+    toastEl.textContent = text;
+    toastEl.hidden = false;
+    window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => (toastEl.hidden = true), 5000);
+  };
 
   const setSwitch = (btn: HTMLButtonElement, on: boolean): void => {
     btn.setAttribute("aria-pressed", String(on));
@@ -90,6 +115,8 @@ export function bindStoryUi(
   const pause = pauseOverlay(q<HTMLElement>("#stage"), {
     onChange: (paused) => {
       story.setPaused(paused);
+      if (paused) music.stop();
+      else music.start();
       pauseBtn.textContent = paused ? "▶ RESUME" : "❚❚ PAUSE";
     },
   });
@@ -103,12 +130,24 @@ export function bindStoryUi(
     setSwitch(gameToggle, story.on);
     gameToggle.blur();
   });
+  const toggleFreeze = (): void => {
+    frozen = !frozen;
+    freezeBtn.textContent = frozen ? "▶ LIVE" : "❄ FREEZE";
+    freezeBtn.className = frozen ? "gm-btn small green" : "gm-btn small blue";
+    showToastNow(frozen ? "❄ Desk frozen: play your setup as long as you like. Press LIVE to update again." : "▶ Live again: the camera is updating your world.");
+    onFreezeChange?.(frozen);
+  };
+  freezeBtn.addEventListener("click", () => {
+    toggleFreeze();
+    freezeBtn.blur();
+  });
   pauseBtn.addEventListener("click", () => {
     pause.toggle();
     pauseBtn.blur();
   });
   const onKey = (e: KeyboardEvent): void => {
     if ((e.key === "p" || e.key === "P" || e.key === "Escape") && !(e.target instanceof HTMLInputElement)) pause.toggle();
+    if ((e.key === "f" || e.key === "F") && !(e.target instanceof HTMLInputElement)) toggleFreeze();
   };
   window.addEventListener("keydown", onKey);
 
@@ -123,13 +162,11 @@ export function bindStoryUi(
       stageMsg.hidden = html === null;
       if (html !== null) stageMsgBody.innerHTML = html;
     },
-    toast: (text) => {
-      toastEl.textContent = text;
-      toastEl.hidden = false;
-      window.clearTimeout(toastTimer);
-      toastTimer = window.setTimeout(() => (toastEl.hidden = true), 5000);
-    },
+    toast: (text) => showToastNow(text),
+    isFrozen: () => frozen,
+    toggleFreeze,
     dispose: () => {
+      music.stop();
       window.removeEventListener("keydown", onKey);
       window.clearTimeout(toastTimer);
     },

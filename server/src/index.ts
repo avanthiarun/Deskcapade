@@ -8,6 +8,7 @@ import type { InfoResponse } from "@deskcapade/shared";
 import { config, logStartupMode } from "./config.js";
 import { attachRelay } from "./relay.js";
 import { courseRouter } from "./routes/course.js";
+import { characterRouter } from "./routes/character.js";
 import { healthRouter } from "./routes/health.js";
 import { matchRouter } from "./routes/match.js";
 import { scanRouter } from "./routes/scan.js";
@@ -51,6 +52,7 @@ app.use("/api/health", healthRouter);
 app.use("/api/scan", scanRouter);
 app.use("/api/course", courseRouter);
 app.use("/api/match", matchRouter);
+app.use("/api/character", characterRouter);
 app.get("/api/info", (_req, res) => {
   const tunnelUrl = readTunnelUrl();
   const body: InfoResponse = { lanUrls: lanUrls(), ...(tunnelUrl ? { tunnelUrl } : {}) };

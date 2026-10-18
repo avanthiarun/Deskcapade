@@ -1,7 +1,8 @@
 import { injectGameStyles } from "../lib/gameStyles";
 import { ROUTES } from "../lib/routes";
 import { getCharacter } from "../game/art";
-import { bestChallengeMs, bindAbout, bindCharacterPicker, formatTime, logoHTML, paintArt, sceneryHTML } from "../lib/shell";
+import { bestChallengeMs, bindAbout, bindCharacterPicker, formatTime, getPoints, logoHTML, paintArt, sceneryHTML } from "../lib/shell";
+import { bindSoundToggle } from "../lib/sound";
 
 /** Home screen: the title, the two game modes, How to play / Credits, and the "?" about box. */
 export function mountHome(root: HTMLElement): () => void {
@@ -15,7 +16,9 @@ export function mountHome(root: HTMLElement): () => void {
         <header class="gm-header">
           ${logoHTML()}
           <div class="gm-header-right">
+            <span class="gm-chip" title="Points from every Challenge course you've beaten">⭐ ${getPoints()} PTS</span>
             <span class="gm-chip" title="Your fastest Challenge course">🏆 BEST ${best === null ? "--:--" : formatTime(best)}</span>
+            <button class="gm-iconbtn" type="button" data-sound></button>
             <button class="gm-iconbtn" type="button" data-about aria-label="What is Deskcapades?">?</button>
           </div>
         </header>
@@ -57,6 +60,7 @@ export function mountHome(root: HTMLElement): () => void {
   paintArt(root);
   bindAbout(root);
   bindCharacterPicker(root);
+  bindSoundToggle(root);
   return () => {
     /* nothing to clean up */
   };

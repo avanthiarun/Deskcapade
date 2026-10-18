@@ -8,8 +8,8 @@ import { bindStoryUi, storyLayoutHTML } from "./storyLayout";
 
 // Each scan takes a few seconds, so scans overlap: a new one starts every SCAN_START_EVERY_MS
 // (at most MAX_SCANS_IN_FLIGHT at once) and results arrive every couple of seconds.
-const SCAN_START_EVERY_MS = 1200; // 50 scans a minute
-const MAX_SCANS_IN_FLIGHT = 5; // each scan takes 4-6 s, so ~5 overlap at this pace
+const SCAN_START_EVERY_MS = 1500; // 40 scans a minute
+const MAX_SCANS_IN_FLIGHT = 4; // each scan takes 4-6 s, so ~4 overlap at this pace
 const ERROR_BACKOFF_MS = 2000; // after a failed scan, wait longer before starting another
 const SCAN_REQUEST_TIMEOUT_MS = 15_000;
 const SCAN_WIDTH = 512; // small frames come back faster
@@ -76,8 +76,21 @@ export function mountCapture(root: HTMLElement): () => void {
 
   // ---------- drawing ----------
 
+  /** While the desk is frozen: the camera picture at the moment you froze it. */
+  let still: HTMLCanvasElement | null = null;
+
   const draw = (): void => {
-    if (video.readyState >= 2 && video.videoWidth > 0) {
+    if (ui.isFrozen()) {
+      // keep showing the picture from when you froze it; no new frames, no motion tracking
+      if (!still && video.videoWidth > 0) {
+        still = document.createElement("canvas");
+        still.width = canvas.width;
+        still.height = canvas.height;
+        still.getContext("2d")!.drawImage(video, 0, 0, still.width, still.height);
+      }
+      if (still) ctx.drawImage(still, 0, 0);
+    } else if (video.readyState >= 2 && video.videoWidth > 0) {
+      still = null;
       if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
@@ -107,7 +120,7 @@ export function mountCapture(root: HTMLElement): () => void {
 
   /** Send the current camera frame to the server; a slower answer than a newer one is dropped. */
   const startScan = async (): Promise<void> => {
-    if (inFlight >= MAX_SCANS_IN_FLIGHT || performance.now() < backoffUntil) return;
+    if (ui.isFrozen() || inFlight >= MAX_SCANS_IN_FLIGHT || performance.now() < backoffUntil) return;
     if (video.readyState < 2 || video.videoWidth === 0) return; // camera not ready yet
     const scale = Math.min(1, SCAN_WIDTH / video.videoWidth);
     const width = Math.round(video.videoWidth * scale);
@@ -138,7 +151,7 @@ export function mountCapture(root: HTMLElement): () => void {
         return;
       }
       lastError = "";
-      if (seq < newestApplied) return; // a newer scan already answered
+      if (seq < newestApplied || ui.isFrozen()) return; // a newer scan already answered, or the desk is frozen
       newestApplied = seq;
       layer.update(body.objects, body.imageSize, panAtCapture);
       matchInBackground(body.objects.map((o) => o.label ?? "")); // unlisted things take the shape of the closest listed one

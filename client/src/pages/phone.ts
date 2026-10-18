@@ -27,6 +27,14 @@ const SNAP_CSS = `
 .dcp-snap[hidden], .dcp-flash[hidden] { display: none; }
 .dcp-snaplabel { position: fixed; right: 18px; top: calc(50% + 50px); z-index: 6; width: 86px; text-align: center;
   font: 700 12px system-ui, sans-serif; color: #fff; text-shadow: 0 1px 3px #000; }
+.dcp-freeze { position: fixed; left: 22px; top: 50%; z-index: 6; width: 78px; height: 78px; transform: translateY(-50%);
+  border-radius: 50%; border: 5px solid #2b1d14; background: #a8e0ff; box-shadow: 0 0 0 4px #fff7e6, 4px 4px 0 6px #2b1d14;
+  font: 700 26px system-ui, sans-serif; cursor: pointer; }
+.dcp-freeze.on { background: #a8e86c; }
+.dcp-freeze:active { transform: translateY(-50%) scale(0.92); }
+.dcp-freeze[hidden], .dcp-freezelabel[hidden] { display: none; }
+.dcp-freezelabel { position: fixed; left: 14px; top: calc(50% + 50px); z-index: 6; width: 94px; text-align: center;
+  font: 700 12px system-ui, sans-serif; color: #fff; text-shadow: 0 1px 3px #000; }
 .dcp-flash { position: fixed; inset: 0; z-index: 7; display: grid; place-items: center; background: rgba(255, 255, 255, 0.85);
   font: 800 28px system-ui, sans-serif; color: #2b1d14; pointer-events: none; }
 `;
@@ -55,6 +63,8 @@ export function mountPhone(root: HTMLElement): () => void {
       </div>
       <p id="error" class="dcp-error dc-hidden"></p>
       <button class="dcp-snap" id="snap" type="button" aria-label="Snap the desk photo" hidden>📸</button>
+      <button class="dcp-freeze" id="freeze" type="button" aria-label="Freeze the desk setup" hidden>❄</button>
+      <span class="dcp-freezelabel" id="freezeLabel" hidden>Freeze</span>
       <span class="dcp-snaplabel" id="snapLabel" hidden>Snap</span>
       <div class="dcp-flash" id="flash" hidden>📸 Snapped!</div>
       <div class="dcp-rotate">
@@ -72,6 +82,10 @@ export function mountPhone(root: HTMLElement): () => void {
   const errorEl = root.querySelector<HTMLElement>("#error")!;
   const snapBtn = root.querySelector<HTMLButtonElement>("#snap")!;
   const snapLabel = root.querySelector<HTMLElement>("#snapLabel")!;
+  const freezeBtn = root.querySelector<HTMLButtonElement>("#freeze")!;
+  const freezeLabel = root.querySelector<HTMLElement>("#freezeLabel")!;
+  let canFreeze = false;
+  let frozen = false;
   const flash = root.querySelector<HTMLElement>("#flash")!;
   const style = document.createElement("style");
   style.textContent = SNAP_CSS;
@@ -124,6 +138,13 @@ export function mountPhone(root: HTMLElement): () => void {
     connChip.className = cls;
     snapBtn.hidden = !(socketState === "open" && canSnap && landscape);
     snapLabel.hidden = snapBtn.hidden;
+    // Story on the laptop: freeze / unfreeze the desk setup from here too
+    freezeBtn.hidden = !(socketState === "open" && canFreeze && landscape);
+    freezeLabel.hidden = freezeBtn.hidden;
+    freezeBtn.textContent = frozen ? "▶" : "❄";
+    freezeBtn.classList.toggle("on", frozen);
+    freezeLabel.textContent = frozen ? "Go live" : "Freeze";
+    if (frozen && socketState === "open" && desktopConnected) connText.textContent = "❄ Desk frozen";
   };
 
   const onOrientationChange = (): void => {
@@ -177,6 +198,8 @@ export function mountPhone(root: HTMLElement): () => void {
         } else if (msg.type === "status") {
           desktopConnected = msg.desktopConnected;
           canSnap = msg.canSnap;
+          canFreeze = msg.canFreeze;
+          frozen = msg.frozen;
           renderStatus();
         } else if (msg.type === "snapped") {
           flash.hidden = false;
@@ -225,6 +248,10 @@ export function mountPhone(root: HTMLElement): () => void {
       );
     }
   };
+
+  freezeBtn.addEventListener("click", () => {
+    socket.send({ type: "freeze" } satisfies PhoneToServer); // the laptop's Story page toggles and tells us
+  });
 
   snapBtn.addEventListener("click", () => {
     socket.send({ type: "snap" } satisfies PhoneToServer); // the laptop's Challenge page takes the photo

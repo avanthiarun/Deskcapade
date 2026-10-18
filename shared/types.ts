@@ -54,7 +54,9 @@ export type FrameMessage = {
 
 export type DesktopToServer =
   | { type: "scan" }
-  | { type: "autoscan"; enabled: boolean; intervalMs: number };
+  | { type: "autoscan"; enabled: boolean; intervalMs: number }
+  /** Story page: the desk was frozen / unfrozen (so the phone's button shows it, and scanning pauses). */
+  | { type: "frozen"; frozen: boolean };
 
 export type ScanResultMessage = { type: "scanResult" } & ScanResponse;
 
@@ -70,14 +72,26 @@ export type ErrorMessage = { type: "error"; error: string; code?: string };
 /** The phone's Snap button was pressed: the Challenge page takes its photo. */
 export type SnapMessage = { type: "snap" };
 
-export type ServerToDesktop = FrameMessage | ScanResultMessage | StatusToDesktop | ErrorMessage | SnapMessage;
+/** The phone's Freeze button was pressed: the Story page freezes / unfreezes the desk. */
+export type FreezeMessage = { type: "freeze" };
+
+export type ServerToDesktop = FrameMessage | ScanResultMessage | StatusToDesktop | ErrorMessage | SnapMessage | FreezeMessage;
 
 /** Text messages the phone sends (frames go as binary). */
-export type PhoneToServer = SnapMessage;
+export type PhoneToServer = SnapMessage | FreezeMessage;
 
 /** `ack` tells the phone its last frame arrived, so it can send the next (fresh) one. */
 export type ServerToPhone =
-  | { type: "status"; desktopConnected: boolean; /** a Challenge page is open: show the Snap button */ canSnap: boolean }
+  | {
+      type: "status";
+      desktopConnected: boolean;
+      /** a Challenge page is open: show the Snap button */
+      canSnap: boolean;
+      /** a Story page is open: show the Freeze button */
+      canFreeze: boolean;
+      /** the Story page's desk is frozen right now */
+      frozen: boolean;
+    }
   | { type: "ack" }
   /** your snap reached the laptop */
   | { type: "snapped" };
@@ -119,6 +133,9 @@ export type CourseDesign = {
   /** How long a decent player needs, generously (the course must be beaten within this). */
   timeLimitSec?: number;
 };
+
+/** POST /api/character answer: a pixel character drawn from a photographed object (18 rows x 16). */
+export type CharacterResponse = { ok: true; name: string; rows: string[]; colors: Record<string, string> };
 
 /** POST /api/match answer: unlisted desk-object label -> the kind of the listed object it's most like. */
 export type MatchResponse = { ok: true; kinds: Record<string, string> };

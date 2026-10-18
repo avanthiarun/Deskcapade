@@ -937,3 +937,18 @@ export function drawCoin(ctx: CanvasRenderingContext2D, x: number, y: number, p:
   if (half > 2 * p) px(ctx, cx - p / 2, cy - 2 * p, p, 4 * p, "#e0a020"); // the coin's notch
   if (Math.floor(t / 300) % 3 === 0) sparkle(ctx, cx + half + p, cy - 4 * p, p, CREAM);
 }
+
+/* ---------- floating slabs of land under raised objects ---------- */
+
+/**
+ * A floating slab of land, Super-Mario style: a grassy top at `y` from x1 to x2, a dirt underside
+ * full of cobbles `thick` deep with a ragged, tapering bottom, and a few vines hanging off it.
+ */
+export function drawSlab(ctx: CanvasRenderingContext2D, x1: number, x2: number, y: number, thick: number, p: number, t: number): void {
+  if (x2 - x1 < 3 * p) return;
+  const r = { x: snap(x1, p), y: snap(y, p), w: snap(x2 - x1, p), h: Math.max(6 * p, snap(thick, p)) };
+  const grassH = 4 * p;
+  earth(ctx, { x: r.x, y: r.y + grassH, w: r.w, h: r.h - grassH }, p, STONE_TONES);
+  grassTop(ctx, r.x, r.x + r.w, r.y, p, "#ff86a8");
+  hangingVines(ctx, r.x, r.x + r.w, r.y + grassH, r.h * 0.7, p, t);
+}

@@ -285,6 +285,8 @@ export type Character = {
   id: string;
   name: string;
   head: readonly string[];
+  /** A whole drawing (18 rows: head and body) instead of head + the shared body: characters made from photos. */
+  rows?: readonly string[];
   colors: Readonly<Record<string, string>>;
   /** Little touches drawn over the body (body rows are grid rows 6-17). */
   tweak?: (g: Grid) => void;
@@ -388,19 +390,64 @@ export const CHARACTERS: readonly Character[] = [
 ];
 
 const CHARACTER_KEY = "deskcapade.character";
+const CUSTOM_KEY = "deskcapade.customCharacters";
+const MAX_CUSTOM = 8;
+const ALLOWED_PIXELS = new Set([..."obhdwkpmacen."]);
+const HEX = /^#[0-9a-f]{6}$/i;
+
+/** Characters made from photos of your own stuff (saved in this browser, newest last). */
+let custom: Character[] = [];
+try {
+  custom = (JSON.parse(localStorage.getItem(CUSTOM_KEY) ?? "[]") as Character[]).filter((c) => Array.isArray(c.rows));
+} catch {
+  /* storage unavailable or empty */
+}
+
+/** The 10 presets, then your photo characters. */
+export const allCharacters = (): readonly Character[] => [...CHARACTERS, ...custom];
+
 let currentId = "sprout";
 try {
   const saved = localStorage.getItem(CHARACTER_KEY);
-  if (saved && CHARACTERS.some((c) => c.id === saved)) currentId = saved;
+  if (saved && allCharacters().some((c) => c.id === saved)) currentId = saved;
 } catch {
   /* storage unavailable: the sprout it is */
 }
 
+/**
+ * Add a character drawn from a photo (by the AI, or the game's fallback). The drawing is cleaned
+ * up to the game's 16 x 18 grid; returns null if there isn't a real character in it.
+ */
+export function addCustomCharacter(name: string, rows: readonly string[], colors: Record<string, string>): Character | null {
+  const grid = Array.from({ length: 18 }, (_, y) =>
+    [...(rows[y] ?? "").padEnd(16, ".").slice(0, 16)].map((ch) => (ALLOWED_PIXELS.has(ch) ? ch : ".")).join(""),
+  );
+  const filled = grid.join("").replace(/\./g, "").length;
+  if (filled < 70) return null;
+  const clean: Record<string, string> = {};
+  for (const [k, v] of Object.entries(colors)) if (ALLOWED_PIXELS.has(k) && k !== "." && typeof v === "string" && HEX.test(v)) clean[k] = v;
+  if (!clean.b) return null;
+  clean.h ??= clean.b;
+  clean.d ??= clean.b;
+  const ch: Character = { id: `photo-${Date.now()}`, name: name.trim().slice(0, 20) || "Buddy", head: [], rows: grid, colors: clean };
+  custom = [...custom, ch].slice(-MAX_CUSTOM);
+  try {
+    localStorage.setItem(CUSTOM_KEY, JSON.stringify(custom));
+  } catch {
+    /* storage unavailable: it still works for this visit */
+  }
+  return ch;
+}
+
+/** Rows for a simple round-eared buddy in the given colors: the fallback when no AI drawing is available. */
+export const BUDDY_HEAD = ["................", "...ooo....ooo...", "..obbbo..obbbo..", "..obpbo..obpbo..", "...obbo..obbo...", "....oo....oo...."];
+export const buddyRows = (): string[] => [...BUDDY_HEAD, ...BODY];
+
 /** The character you play as (saved in this browser). */
-export const getCharacter = (): Character => CHARACTERS.find((c) => c.id === currentId) ?? CHARACTERS[0]!;
+export const getCharacter = (): Character => allCharacters().find((c) => c.id === currentId) ?? CHARACTERS[0]!;
 
 export function setCharacter(id: string): void {
-  if (!CHARACTERS.some((c) => c.id === id)) return;
+  if (!allCharacters().some((c) => c.id === id)) return;
   currentId = id;
   try {
     localStorage.setItem(CHARACTER_KEY, id);
@@ -415,7 +462,7 @@ function characterCanvas(ch: Character, frame: number): HTMLCanvasElement {
   const cacheKey = `${ch.id}:${frame}`;
   const cached = charCache.get(cacheKey);
   if (cached) return cached;
-  const rows = [...ch.head, ...BODY, FEET[frame] ?? FEET[0]!].map((r) => r.padEnd(16, ".").slice(0, 16));
+  const rows = [...(ch.rows ?? [...ch.head, ...BODY]), FEET[frame] ?? FEET[0]!].map((r) => r.padEnd(16, ".").slice(0, 16));
   const grid: Grid = rows.map((r) => [...r]);
   ch.tweak?.(grid);
   const colors = { ...BASE_COLORS, ...ch.colors };
@@ -450,7 +497,7 @@ export function drawSprout(
   bob: number,
   characterId?: string,
 ): number {
-  const ch = (characterId && CHARACTERS.find((c) => c.id === characterId)) || getCharacter();
+  const ch = (characterId && allCharacters().find((c) => c.id === characterId)) || getCharacter();
   const c = characterCanvas(ch, frame);
   const scale = Math.max(1, Math.round(height / c.height));
   const w = c.width * scale;
