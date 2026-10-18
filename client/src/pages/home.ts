@@ -8,7 +8,7 @@ import { drawPixelCat } from "../lib/sprites";
  */
 const MODES = [
   { href: ROUTES.story, title: "Story", blurb: "Live camera adventure", alt: false },
-  { href: ROUTES.challenge, title: "Challenge", blurb: "Snap one photo, beat the goal", alt: true },
+  { href: ROUTES.challenge, title: "Challenge", blurb: "Snap your desk, watch it go pixel", alt: true },
 ] as const;
 
 /** Home screen: title, a little cat, and the two game modes. */

@@ -1,50 +1,51 @@
 import QRCode from "qrcode";
 import type { InfoResponse, ServerToDesktop } from "@deskcapade/shared";
-import { ObjectTracker, renderDetectedText } from "../lib/detections";
+import { LiveSpriteLayer, renderLiveDetectedText } from "../lib/liveSprites";
+import { injectGameStyles } from "../lib/gameStyles";
+import { ROUTES } from "../lib/routes";
 import { connectSocket } from "../lib/socket";
-import { injectStyles } from "../lib/styles";
+import { injectStoryStyles } from "../lib/storyStyles";
 
 const STALE_FRAME_MS = 2000;
 const BASE_STORAGE_KEY = "deskcapade.phoneBase";
 const FRAME_HEADER_BYTES = 4; // width + height (uint16 each), then the JPEG
 
 /**
- * Phone-camera page (opened on the laptop): shows the phone's video with detection boxes on top
- * and the "Detected: ..." text underneath. It never opens the laptop camera. Detection runs
+ * Phone-camera page (opened on the laptop): shows the phone's video with every desk object
+ * covered by its pixel sprite (sprites follow the picture as the phone moves), and the
+ * "Detected: ..." text underneath. "Pixel world" swaps the video for the pixel backdrop. It never opens the laptop camera. Detection runs
  * automatically on the server (every 250 ms), so there are no scan controls here.
  */
 export function mountDesktop(root: HTMLElement): () => void {
-  injectStyles();
+  injectGameStyles();
+  injectStoryStyles();
 
   root.innerHTML = `
-    <div class="dc-page dcd">
-      <div class="dc-stage dcd-stage">
-        <canvas id="view" width="1280" height="720"></canvas>
-      </div>
-
-      <div class="dcd-info">
-        <div class="dcd-top">
-          <h1>Deskcapade</h1>
-          <div class="dc-bar">
-            <span class="dc-chip" id="phoneChip"><span class="dc-dot"></span><span id="phoneText">Connecting…</span></span>
-            <span class="dc-chip" id="countChip">0 objects</span>
-            <span class="dc-chip" id="latencyChip">– ms</span>
-            <span class="dc-chip warn dc-hidden" id="mockChip">MOCK</span>
-          </div>
+    <main class="gm">
+      <div class="gm-wrap">
+        <a class="gm-back" href="${ROUTES.story}">◀ Story</a>
+        <h1 class="gm-h1">Story</h1>
+        <div class="gm-stage"><canvas id="view" width="1280" height="720"></canvas></div>
+        <div class="gm-row">
+          <span class="gm-chip" id="phoneChip"><span id="phoneText">Connecting…</span></span>
+          <span class="gm-chip" id="countChip">0 objects</span>
+          <span class="gm-chip" id="latencyChip">– ms</span>
+          <span class="gm-chip warn" id="mockChip" hidden>MOCK</span>
+          <button class="gm-btn small ghost" id="pixelToggle" type="button" aria-pressed="false">🌄 Pixel world: Off</button>
         </div>
 
-        <div class="detected-text" id="detected" hidden aria-live="polite"></div>
+        <p class="st-detected" id="detected" hidden aria-live="polite"></p>
 
-        <details class="dc-connect" id="connect" open>
+        <details class="st-connect" id="connect" open>
           <summary>Connect your phone</summary>
-          <div class="dc-connect-body">
-            <img id="qr" alt="QR code that opens the phone camera page" width="180" height="180">
-            <div class="dc-connect-fields">
+          <div class="st-connect-body">
+            <img id="qr" alt="QR code that opens the phone camera page" width="160" height="160">
+            <div class="st-fields">
               <div>
-                <div style="color: var(--dc-dim); font-size: 0.85rem;">Open on your phone, then hold it sideways</div>
-                <div class="dc-url" id="phoneUrl">Looking for this laptop's address…</div>
+                <p>Open this on your phone, then hold it sideways:</p>
+                <div class="gm-url" id="phoneUrl">Looking for this laptop's address…</div>
               </div>
-              <label class="dc-hidden" id="lanLabel">Phone link source
+              <label id="lanLabel" hidden>Phone link source
                 <select id="lanSelect"></select>
               </label>
               <label>Tunnel or custom address (optional)
@@ -53,10 +54,10 @@ export function mountDesktop(root: HTMLElement): () => void {
             </div>
           </div>
         </details>
-      </div>
 
-      <div class="dc-toast dc-hidden" id="toast" role="status"></div>
-    </div>
+        <div class="gm-toast" id="toast" role="status" hidden></div>
+      </div>
+    </main>
   `;
 
   const q = <T extends HTMLElement>(sel: string): T => root.querySelector<T>(sel)!;
@@ -75,14 +76,16 @@ export function mountDesktop(root: HTMLElement): () => void {
   const lanLabel = q<HTMLElement>("#lanLabel");
   const lanSelect = q<HTMLSelectElement>("#lanSelect");
   const baseOverride = q<HTMLInputElement>("#baseOverride");
+  const pixelToggle = q<HTMLButtonElement>("#pixelToggle");
 
   // ---------- state ----------
 
-  const tracker = new ObjectTracker();
+  const layer = new LiveSpriteLayer();
   let socketOpen = false;
   let phoneConnected = false;
   let frameImg: ImageBitmap | null = null;
   let lastFrameAt = 0;
+  let freshFrame = false; // a new phone frame arrived since the last draw
   let decoding = false;
   let pendingFrame: ArrayBuffer | null = null;
   let latencyMs: number | null = null;
@@ -94,28 +97,37 @@ export function mountDesktop(root: HTMLElement): () => void {
 
   const showToast = (text: string): void => {
     toast.textContent = text;
-    toast.classList.remove("dc-hidden");
+    toast.hidden = false;
     window.clearTimeout(toastTimer);
-    toastTimer = window.setTimeout(() => toast.classList.add("dc-hidden"), 5000);
+    toastTimer = window.setTimeout(() => {
+      toast.hidden = true;
+    }, 5000);
   };
+
+  const renderToggle = (): void => {
+    pixelToggle.textContent = `🌄 Pixel world: ${layer.pixelWorld ? "On" : "Off"}`;
+    pixelToggle.setAttribute("aria-pressed", String(layer.pixelWorld));
+  };
+
 
   const renderChips = (): void => {
     if (!socketOpen) {
       phoneText.textContent = "Server offline";
-      phoneChip.className = "dc-chip warn";
+      phoneChip.className = "gm-chip warn";
     } else if (phoneConnected) {
       phoneText.textContent = "Phone connected";
-      phoneChip.className = "dc-chip on";
+      phoneChip.className = "gm-chip on";
     } else {
       phoneText.textContent = "Waiting for phone";
-      phoneChip.className = "dc-chip warn";
+      phoneChip.className = "gm-chip warn";
     }
 
-    const count = tracker.count;
+    const count = layer.count;
     countChip.textContent = `${count} object${count === 1 ? "" : "s"}`;
-    countChip.className = count > 0 ? "dc-chip on" : "dc-chip";
+    countChip.className = count > 0 ? "gm-chip on" : "gm-chip";
     latencyChip.textContent = latencyMs === null ? "– ms" : `${latencyMs} ms`;
-    renderDetectedText(detectedEl, tracker);
+    renderLiveDetectedText(detectedEl, layer);
+    renderToggle();
   };
 
   // ---------- websocket ----------
@@ -140,6 +152,7 @@ export function mountDesktop(root: HTMLElement): () => void {
         frameImg?.close();
         frameImg = bmp;
         lastFrameAt = performance.now();
+        freshFrame = true;
       })
       .catch(() => undefined)
       .finally(() => {
@@ -157,7 +170,7 @@ export function mountDesktop(root: HTMLElement): () => void {
       socketOpen = s === "open";
       if (!socketOpen) {
         phoneConnected = false;
-        tracker.clear();
+        layer.clear();
       }
       renderChips();
     },
@@ -172,13 +185,13 @@ export function mountDesktop(root: HTMLElement): () => void {
       switch (msg.type) {
         case "scanResult":
           latencyMs = msg.latencyMs;
-          tracker.update(msg.objects, msg.imageSize);
-          renderChips();
+          // the server scanned a frame from about `latencyMs` ago: place boxes where the picture was then
+          layer.update(msg.objects, msg.imageSize, layer.motion.at(performance.now() - msg.latencyMs - 60));
           break;
         case "status":
           phoneConnected = msg.phoneConnected;
-          if (!phoneConnected) tracker.clear();
-          mockChip.classList.toggle("dc-hidden", !msg.mock);
+          if (!phoneConnected) layer.clear();
+          mockChip.hidden = !msg.mock;
           connect.open = !phoneConnected;
           renderChips();
           break;
@@ -205,17 +218,20 @@ export function mountDesktop(root: HTMLElement): () => void {
         canvas.height = h;
       }
       ctx.drawImage(frameImg, 0, 0, canvas.width, canvas.height);
+      if (layer.frame(ctx, freshFrame, now)) renderChips();
+      freshFrame = false;
     } else {
       ctx.fillStyle = "#120f20";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
+
+    layer.draw(ctx, now);
 
     if (!hasFrame) {
       ctx.fillStyle = "rgba(18, 15, 32, 0.6)";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
 
-    tracker.draw(ctx, canvas.width, canvas.height);
     if (!stopped) raf = requestAnimationFrame(draw);
   };
   raf = requestAnimationFrame(draw);
@@ -281,7 +297,7 @@ export function mountDesktop(root: HTMLElement): () => void {
     // Keep the person's own choice; otherwise use the first entry (the tunnel, once it exists).
     const keep = userPicked ? sources.findIndex((src) => src.url === previous) : -1;
     lanSelect.value = String(keep >= 0 ? keep : 0);
-    lanLabel.classList.toggle("dc-hidden", sources.length < 2);
+    lanLabel.hidden = sources.length < 2;
     void renderConnect();
   };
 
@@ -313,6 +329,10 @@ export function mountDesktop(root: HTMLElement): () => void {
       /* ignore */
     }
     void renderConnect();
+  });
+  pixelToggle.addEventListener("click", () => {
+    layer.setPixelWorld(!layer.pixelWorld);
+    renderToggle();
   });
   lanSelect.addEventListener("change", () => {
     userPicked = true;

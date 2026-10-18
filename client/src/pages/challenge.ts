@@ -7,52 +7,49 @@ import type {
 } from "@deskcapade/shared";
 import { injectGameStyles } from "../lib/gameStyles";
 import { ROUTES } from "../lib/routes";
-import { spriteNodeFor } from "../lib/sprites";
+import { injectChallengeStyles } from "../lib/challengeStyles";
+import { pickDeskObjects } from "../lib/deskFilter";
+import {
+  composeCoveredScene,
+  composePixelWorldScene,
+  makeDeskSprite,
+  type DeskSprite,
+} from "../lib/deskSprites";
+import { playPixelTransition, type PixelTransition } from "../lib/pixelTransition";
 import { connectSocket } from "../lib/socket";
 
 const SNAP_WIDTH = 800; // the photo is scaled down to this width before it is sent
 const SNAP_JPEG_QUALITY = 0.8;
-const SCAN_TIMEOUT_MS = 20_000;
+const SCAN_TIMEOUT_MS = 20_000; // a bit longer than the server's own 15 s wait for Perceptron
+/** If a scan is slow or the service is busy, try again with a smaller (faster) picture. */
+const SCAN_ATTEMPT_WIDTHS = [SNAP_WIDTH, 640, 512];
+/** Server error codes worth retrying: Perceptron was slow, busy, or unreachable. */
+const RETRY_CODES = new Set(["TIMEOUT", "RATE_LIMITED", "NETWORK", "UPSTREAM_ERROR"]);
 const FRAME_HEADER_BYTES = 4; // width + height (uint16 each), then the JPEG
 
-/** A goal is met when any detected label contains one of these words. Edit freely. */
-const OBJECTIVES = [
-  { text: "Find something you drink from", words: ["mug", "cup", "glass", "bottle"] },
-  { text: "Find something you read", words: ["book", "notebook", "magazine", "paper"] },
-  { text: "Find a plant", words: ["plant", "flower", "leaf", "leaves"] },
-  { text: "Find a phone", words: ["phone", "smartphone"] },
-  { text: "Find something to type on", words: ["keyboard", "laptop"] },
-  { text: "Find a friendly face", words: ["person", "face", "man", "woman"] },
-];
-
-type Objective = (typeof OBJECTIVES)[number];
 type Source = "laptop" | "phone";
 type Screen = "source" | "camera" | "result";
-
-const pickObjective = (prev?: Objective): Objective => {
-  const pool = OBJECTIVES.filter((o) => o !== prev);
-  return pool[Math.floor(Math.random() * pool.length)]!;
-};
 
 const short = (s: string): string => (s.length > 34 ? `${s.slice(0, 33).trimEnd()}…` : s);
 
 /**
- * Challenge mode: choose laptop or phone camera, take ONE photo, and see what was found as
- * pixel art. No video is analysed here. The phone path reuses the same relay as the Story page,
+ * Challenge mode: choose laptop or phone camera and snap a photo whenever you like. The desk
+ * objects in it (not the background) are covered by cute pixel sprites right where they are;
+ * the rest of the photo stays exactly as taken. No video is analysed here. The phone path reuses the same relay as the Story page,
  * but connects with scan=0 so the server doesn't scan continuously.
  */
 export function mountChallenge(root: HTMLElement): () => void {
   injectGameStyles();
+  injectChallengeStyles();
 
   root.innerHTML = `
     <main class="gm">
       <div class="gm-wrap">
         <a class="gm-back" href="${ROUTES.home}">◀ Home</a>
         <h1 class="gm-h1">Challenge</h1>
-        <p class="gm-goal" id="goal"></p>
 
         <section id="sourceView">
-          <p class="gm-note">Pick your camera. You get one photo per try.</p>
+          <p class="gm-note">Pick your camera, then snap your desk whenever you're ready. Everything on it turns pixel-cute!</p>
           <div class="gm-choices">
             <button class="gm-btn" id="pickLaptop" type="button"><b>Laptop camera</b><span>Use this computer's camera</span></button>
             <button class="gm-btn alt" id="pickPhone" type="button"><b>Phone camera</b><span>Use your phone as the camera</span></button>
@@ -77,14 +74,14 @@ export function mountChallenge(root: HTMLElement): () => void {
 
         <section id="resultView" hidden>
           <div class="gm-verdict" id="verdict"></div>
-          <div class="gm-result">
-            <div class="gm-photo" id="photo"></div>
-            <div class="gm-shelf" id="shelf"></div>
-          </div>
+          <div class="ch-scene" id="scene"></div>
+          <p class="ch-skipped" id="skipped" hidden></p>
           <div class="gm-row">
-            <button class="gm-btn small" id="again" type="button">Try again</button>
-            <button class="gm-btn small ghost" id="next" type="button">New goal</button>
+            <button class="gm-btn small" id="again" type="button">📸 Snap another</button>
+            <button class="gm-btn small ghost" id="next" type="button">Change camera</button>
+            <button class="gm-btn small ghost" id="bgToggle" type="button" aria-pressed="false">🌄 Pixel background: Off</button>
           </div>
+          <div class="gm-shelf ch-shelf" id="shelf"></div>
         </section>
 
         <video id="video" class="hidden-video" autoplay muted playsinline></video>
@@ -94,7 +91,6 @@ export function mountChallenge(root: HTMLElement): () => void {
   `;
 
   const q = <T extends HTMLElement>(sel: string): T => root.querySelector<T>(sel)!;
-  const goalEl = q<HTMLElement>("#goal");
   const sourceView = q<HTMLElement>("#sourceView");
   const cameraView = q<HTMLElement>("#cameraView");
   const resultView = q<HTMLElement>("#resultView");
@@ -107,7 +103,9 @@ export function mountChallenge(root: HTMLElement): () => void {
   const qrImg = q<HTMLImageElement>("#qr");
   const phoneUrlEl = q<HTMLElement>("#phoneUrl");
   const verdictEl = q<HTMLElement>("#verdict");
-  const photoEl = q<HTMLElement>("#photo");
+  const sceneEl = q<HTMLElement>("#scene");
+  const skippedEl = q<HTMLElement>("#skipped");
+  const bgToggle = q<HTMLButtonElement>("#bgToggle");
   const shelfEl = q<HTMLElement>("#shelf");
   const toast = q<HTMLElement>("#toast");
 
@@ -115,13 +113,20 @@ export function mountChallenge(root: HTMLElement): () => void {
 
   let screen: Screen = "source";
   let source: Source | null = null;
-  let objective = pickObjective();
   let stream: MediaStream | null = null;
   let socket: ReturnType<typeof connectSocket> | null = null;
   let frame: ImageBitmap | null = null;
   let decoding = false;
   let pendingFrame: ArrayBuffer | null = null;
   let busy = false;
+  /** The photo just taken. While set, the preview shows it instead of the live camera. */
+  let frozenShot: HTMLCanvasElement | null = null;
+  /** Pixel background instead of the photo. Remembered between snaps. */
+  let pixelBackground = false;
+  let lastShot: HTMLCanvasElement | null = null;
+  let lastSprites: DeskSprite[] = [];
+  /** The photo -> pixel world animation, while it's playing. */
+  let transition: PixelTransition | null = null;
   let stopped = false;
   let raf = 0;
   let toastTimer: number | undefined;
@@ -145,10 +150,6 @@ export function mountChallenge(root: HTMLElement): () => void {
     camStatus.className = on ? "gm-chip on" : "gm-chip";
   };
 
-  const renderGoal = (): void => {
-    goalEl.textContent = `Goal: ${objective.text}`;
-  };
-
   const render = (): void => {
     sourceView.hidden = screen !== "source";
     cameraView.hidden = screen !== "camera";
@@ -169,6 +170,8 @@ export function mountChallenge(root: HTMLElement): () => void {
     frame?.close();
     frame = null;
     pendingFrame = null;
+    frozenShot = null;
+    stopTransition();
     window.clearTimeout(infoTimer);
     infoPolls = 0;
     shownUrl = "";
@@ -323,7 +326,14 @@ export function mountChallenge(root: HTMLElement): () => void {
   const draw = (): void => {
     if (screen === "camera") {
       snapBtn.disabled = busy || !isReady();
-      if (source === "laptop" && video.readyState >= 2 && video.videoWidth > 0) {
+      if (frozenShot) {
+        // a photo was just taken: hold it on screen instead of the live camera
+        if (canvas.width !== frozenShot.width || canvas.height !== frozenShot.height) {
+          canvas.width = frozenShot.width;
+          canvas.height = frozenShot.height;
+        }
+        ctx.drawImage(frozenShot, 0, 0);
+      } else if (source === "laptop" && video.readyState >= 2 && video.videoWidth > 0) {
         if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
@@ -363,54 +373,95 @@ export function mountChallenge(root: HTMLElement): () => void {
     return shot;
   };
 
-  const found = (labels: string[]): boolean =>
-    labels.some((label) =>
-      objective.words.some((w) => new RegExp(`\\b${w}s?\\b`, "i").test(label)),
+  const stopTransition = (): void => {
+    transition?.cancel();
+    transition = null;
+  };
+
+  const renderBgToggle = (): void => {
+    bgToggle.textContent = `🌄 Pixel background: ${pixelBackground ? "On" : "Off"}`;
+    bgToggle.setAttribute("aria-pressed", String(pixelBackground));
+  };
+
+  /** Draw the result: the photo as taken with each object covered by its sprite, or the sprites on the pixel backdrop. */
+  const renderScene = (): void => {
+    stopTransition(); // e.g. the background toggle was clicked mid-animation: jump straight to that view
+    renderBgToggle();
+    if (!lastShot) return;
+    sceneEl.replaceChildren(
+      pixelBackground
+        ? composePixelWorldScene(lastShot, lastSprites)
+        : composeCoveredScene(lastShot, lastSprites),
     );
+  };
 
-  const showResult = async (shot: HTMLCanvasElement, res: ScanResponse): Promise<void> => {
-    stopSources(); // one photo only: camera and phone link are released
-    const labels = res.objects.map((o) => o.label ?? "object");
-    const won = found(labels);
-    verdictEl.textContent = won ? "You found it! ★" : "Not quite… try again!";
-    verdictEl.className = `gm-verdict ${won ? "win" : "lose"}`;
+  const showResult = (shot: HTMLCanvasElement, res: ScanResponse): void => {
+    stopSources(); // camera and phone link are released while you look at the result
 
-    shot.removeAttribute("class");
-    photoEl.replaceChildren(shot);
+    const { kept, skipped } = pickDeskObjects(shot, res.objects, res.imageSize);
+    const sprites = kept.map((c) => makeDeskSprite(c.label, shot, c.box));
 
-    shelfEl.replaceChildren();
-    if (res.objects.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "gm-empty";
-      empty.textContent = "Nothing spotted. Try more light or move closer!";
-      shelfEl.append(empty);
+    verdictEl.textContent =
+      sprites.length > 0
+        ? `Found ${sprites.length} desk thing${sprites.length === 1 ? "" : "s"}! ★`
+        : "No desk things spotted. Try more light or move closer!";
+    verdictEl.className = `gm-verdict ${sprites.length > 0 ? "win" : "lose"}`;
+
+    lastShot = shot;
+    lastSprites = sprites;
+    if (sprites.length > 0) {
+      // the real photo morphs into the pixel world (~4 s), ending with the pixel background on
+      pixelBackground = true;
+      renderBgToggle();
+      const anim = playPixelTransition(shot, sprites);
+      transition = anim;
+      sceneEl.replaceChildren(anim.canvas);
+      void anim.done.then(() => {
+        if (transition === anim) transition = null;
+      });
     } else {
-      const nodes = await Promise.all(
-        res.objects.map((o) => spriteNodeFor(o.label ?? "object", shot, o.box)),
-      );
-      res.objects.forEach((o, i) => {
+      renderScene();
+    }
+
+    skippedEl.hidden = skipped.length === 0;
+    skippedEl.textContent = `Ignored as background: ${skipped.map((c) => `${short(c.label)} (${c.reason})`).join(", ")}`;
+
+    shelfEl.replaceChildren(
+      ...sprites.map((sp) => {
         const item = document.createElement("div");
         item.className = "gm-item";
+        sp.canvas.className = "gm-px";
         const caption = document.createElement("span");
-        caption.textContent = short(o.label ?? "object");
-        item.append(nodes[i]!, caption);
-        shelfEl.append(item);
-      });
-    }
+        caption.textContent = short(sp.label);
+        item.append(sp.canvas, caption);
+        return item;
+      }),
+    );
 
     if (stopped) return;
     screen = "result";
     render();
   };
 
-  const snap = async (): Promise<void> => {
-    if (busy) return;
-    const shot = takeShot();
-    if (!shot) return;
+  /** A copy of `src` no wider than `maxWidth` (or `src` itself if it already fits). */
+  const shrink = (src: HTMLCanvasElement, maxWidth: number): HTMLCanvasElement => {
+    if (src.width <= maxWidth) return src;
+    const out = document.createElement("canvas");
+    out.width = maxWidth;
+    out.height = Math.round((src.height * maxWidth) / src.width);
+    const octx = out.getContext("2d")!;
+    octx.imageSmoothingQuality = "high";
+    octx.drawImage(src, 0, 0, out.width, out.height);
+    return out;
+  };
 
-    busy = true;
-    snapBtn.disabled = true;
-    snapBtn.textContent = "Looking…";
+  type ScanAttempt =
+    | { kind: "ok"; res: ScanResponse }
+    | { kind: "retry"; error: string; code: string }
+    | { kind: "fail"; error: string };
+
+  /** One request to the server. Slow / busy / network problems are worth retrying; anything else isn't. */
+  const scanOnce = async (image: HTMLCanvasElement): Promise<ScanAttempt> => {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), SCAN_TIMEOUT_MS);
     try {
@@ -418,23 +469,56 @@ export function mountChallenge(root: HTMLElement): () => void {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          image: shot.toDataURL("image/jpeg", SNAP_JPEG_QUALITY),
-          width: shot.width,
-          height: shot.height,
+          image: image.toDataURL("image/jpeg", SNAP_JPEG_QUALITY),
+          width: image.width,
+          height: image.height,
         }),
         signal: controller.signal,
       });
       const body = (await res.json()) as ScanResponse | ApiError;
-      if (stopped) return;
-      if (!body.ok) {
-        showToast(body.error);
-        return;
-      }
-      await showResult(shot, body);
+      if (body.ok) return { kind: "ok", res: body };
+      const code = body.code ?? "";
+      return RETRY_CODES.has(code) || res.status >= 500
+        ? { kind: "retry", error: body.error, code }
+        : { kind: "fail", error: body.error };
     } catch {
-      if (!stopped) showToast("Could not scan that photo. Is the server running?");
+      // our own timeout, or the server didn't answer
+      return { kind: "retry", error: "Could not scan that photo. Is the server running?", code: "NETWORK" };
     } finally {
       window.clearTimeout(timeout);
+    }
+  };
+
+  const wait = (ms: number): Promise<void> => new Promise((r) => window.setTimeout(r, ms));
+
+  const snap = async (): Promise<void> => {
+    if (busy) return;
+    const shot = takeShot();
+    if (!shot) return;
+
+    busy = true;
+    frozenShot = shot;
+    snapBtn.disabled = true;
+    try {
+      let last = "";
+      for (let i = 0; i < SCAN_ATTEMPT_WIDTHS.length; i++) {
+        snapBtn.textContent = i === 0 ? "Looking…" : `Still looking… (${i + 1}/${SCAN_ATTEMPT_WIDTHS.length})`;
+        // later tries send a smaller picture, which Perceptron answers faster.
+        // The boxes come back in that picture's size and are scaled back to the full photo.
+        const attempt = await scanOnce(shrink(shot, SCAN_ATTEMPT_WIDTHS[i] ?? SNAP_WIDTH));
+        if (stopped || frozenShot !== shot) return; // left the page or changed camera meanwhile
+        if (attempt.kind === "ok") {
+          showResult(shot, attempt.res);
+          return;
+        }
+        last = attempt.error;
+        if (attempt.kind === "fail") break;
+        if (i < SCAN_ATTEMPT_WIDTHS.length - 1) await wait(attempt.code === "RATE_LIMITED" ? 2500 : 700);
+        if (stopped || frozenShot !== shot) return;
+      }
+      frozenShot = null; // back to the live camera so you can try again
+      showToast(last || "Could not scan that photo. Try again!");
+    } finally {
       busy = false;
       snapBtn.textContent = "📸 Snap!";
     }
@@ -450,13 +534,12 @@ export function mountChallenge(root: HTMLElement): () => void {
     if (source) void startSource(source);
     else goSource();
   });
-  q<HTMLButtonElement>("#next").addEventListener("click", () => {
-    objective = pickObjective(objective);
-    renderGoal();
-    goSource();
+  q<HTMLButtonElement>("#next").addEventListener("click", goSource);
+  bgToggle.addEventListener("click", () => {
+    pixelBackground = !pixelBackground;
+    renderScene();
   });
 
-  renderGoal();
   render();
   raf = requestAnimationFrame(draw);
 
