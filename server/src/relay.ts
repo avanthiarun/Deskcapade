@@ -1,6 +1,5 @@
 import type { Server as HttpServer } from "node:http";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
-import { z } from "zod";
 import type {
   ErrorMessage,
   ScanResultMessage,
@@ -15,18 +14,13 @@ const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;
 // Skip frames for a slow desktop. Kept small so old frames are dropped instead of queued,
 // which keeps the laptop's video close to live.
 const MAX_BUFFERED_BYTES = 128 * 1024;
-const MIN_AUTOSCAN_MS = 1000;
 const HEARTBEAT_MS = 20_000;
 const FRAME_HEADER_BYTES = 4;
 
-const desktopMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("scan") }),
-  z.object({
-    type: z.literal("autoscan"),
-    enabled: z.boolean(),
-    intervalMs: z.number(),
-  }),
-]);
+// Detection always runs automatically: one scan every 250 ms while a phone and a laptop are connected.
+const SCAN_INTERVAL_MS = 250;
+// After a failed scan (rate limit, network), wait longer before trying again.
+const ERROR_BACKOFF_MS = 2000;
 
 type AliveSocket = WebSocket & { isAlive?: boolean };
 
@@ -47,7 +41,8 @@ function toBuffer(data: RawData): Buffer {
  *   bytes 2-3: height (uint16, little-endian)
  *   bytes 4+ : JPEG image
  *
- * Phone frames are relayed to desktops; desktops ask the server to scan the latest frame.
+ * Phone frames are relayed to desktops. The server scans the latest frame every 250 ms
+ * on its own; desktops only watch.
  */
 export function attachRelay(server: HttpServer): void {
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD_BYTES });
@@ -56,9 +51,12 @@ export function attachRelay(server: HttpServer): void {
   const desktops = new Set<AliveSocket>();
 
   let latestFrame: LatestFrame | null = null;
-  let autoscan = { enabled: false, intervalMs: 1500 };
-  let timer: NodeJS.Timeout | null = null;
+  let lastScannedFrame: LatestFrame | null = null;
   let scanning = false;
+
+  let loopRunning = false;
+  let loopGen = 0;
+  let loopTimer: NodeJS.Timeout | null = null;
 
   // ---------- helpers ----------
 
@@ -77,7 +75,7 @@ export function attachRelay(server: HttpServer): void {
     const toDesktop: StatusToDesktop = {
       type: "status",
       phoneConnected: phones.size > 0,
-      autoscan: autoscan.enabled,
+      autoscan: true, // always on
       mock: config.mock,
     };
     const toPhone: ServerToPhone = { type: "status", desktopConnected: desktops.size > 0 };
@@ -95,44 +93,58 @@ export function attachRelay(server: HttpServer): void {
 
   // ---------- scanning ----------
 
-  /** Scan the most recent phone frame. `quiet` skips error spam for auto-scan ticks with no frame. */
-  async function doScan(quiet: boolean): Promise<void> {
-    if (scanning) return;
-
-    if (phones.size === 0 || !latestFrame) {
-      if (!quiet) {
-        broadcastDesktops({
-          type: "error",
-          error: phones.size === 0 ? "No phone connected" : "No phone frame yet",
-          code: "NO_FRAME",
-        } satisfies ErrorMessage);
-      }
-      return;
-    }
+  /**
+   * Scan the most recent phone frame (skips if there is no new frame since the last scan).
+   * Returns false only if the scan itself failed.
+   */
+  async function doScan(): Promise<boolean> {
+    if (scanning) return true;
+    if (phones.size === 0 || !latestFrame || latestFrame === lastScannedFrame) return true;
 
     scanning = true;
     try {
       const frame = latestFrame;
+      lastScannedFrame = frame;
       const image = `data:image/jpeg;base64,${frame.buf.subarray(FRAME_HEADER_BYTES).toString("base64")}`;
       const result = await runScan(image, frame.width, frame.height);
       broadcastDesktops({ type: "scanResult", ...result } satisfies ScanResultMessage);
+      return true;
     } catch (err) {
       sendError(err);
+      return false;
     } finally {
       scanning = false;
     }
   }
 
-  function stopTimer(): void {
-    if (timer) clearInterval(timer);
-    timer = null;
+  const shouldScan = (): boolean => desktops.size > 0 && phones.size > 0;
+
+  async function tick(gen: number): Promise<void> {
+    if (gen !== loopGen) return;
+    const started = Date.now();
+    const ok = await doScan();
+    if (gen !== loopGen) return; // loop was stopped (and maybe restarted) meanwhile
+    const wait = ok ? SCAN_INTERVAL_MS : ERROR_BACKOFF_MS;
+    loopTimer = setTimeout(() => void tick(gen), Math.max(0, wait - (Date.now() - started)));
   }
 
-  function syncTimer(): void {
-    stopTimer();
-    if (autoscan.enabled && desktops.size > 0) {
-      timer = setInterval(() => void doScan(true), autoscan.intervalMs);
+  function stopScanLoop(): void {
+    loopGen += 1;
+    loopRunning = false;
+    if (loopTimer) clearTimeout(loopTimer);
+    loopTimer = null;
+  }
+
+  /** Runs the scan loop whenever both a phone and a laptop are connected. */
+  function syncScanLoop(): void {
+    if (!shouldScan()) {
+      if (loopRunning) stopScanLoop();
+      return;
     }
+    if (loopRunning) return;
+    loopRunning = true;
+    loopGen += 1;
+    void tick(loopGen);
   }
 
   // ---------- connections ----------
@@ -167,36 +179,19 @@ export function attachRelay(server: HttpServer): void {
       });
       ws.on("close", () => {
         phones.delete(ws);
-        if (phones.size === 0) latestFrame = null;
+        if (phones.size === 0) {
+          latestFrame = null;
+          lastScannedFrame = null;
+        }
+        syncScanLoop();
         broadcastStatus();
       });
     } else if (role === "desktop") {
       desktops.add(ws);
-      ws.on("message", (data: RawData, isBinary: boolean) => {
-        if (isBinary) return;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(toBuffer(data).toString());
-        } catch {
-          return;
-        }
-        const msg = desktopMessageSchema.safeParse(parsed);
-        if (!msg.success) return;
-
-        if (msg.data.type === "scan") {
-          void doScan(false);
-        } else {
-          autoscan = {
-            enabled: msg.data.enabled,
-            intervalMs: Math.max(MIN_AUTOSCAN_MS, msg.data.intervalMs),
-          };
-          syncTimer();
-          broadcastStatus();
-        }
-      });
+      // Desktops only watch: they send nothing the server needs to act on.
       ws.on("close", () => {
         desktops.delete(ws);
-        syncTimer(); // stops auto-scan when nobody is watching
+        syncScanLoop(); // stops scanning when nobody is watching
         broadcastStatus();
       });
     } else {
@@ -207,6 +202,7 @@ export function attachRelay(server: HttpServer): void {
     ws.on("error", () => {
       /* handled by close */
     });
+    syncScanLoop();
     broadcastStatus();
   });
 

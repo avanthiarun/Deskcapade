@@ -21,6 +21,10 @@ const START_LEVEL = 1;
 /**
  * Phone page: only streams the camera. No detection happens here.
  *
+ * The camera fills the whole screen and only streams while the phone is held sideways
+ * (landscape), so the picture matches the laptop's wide screen. In portrait, a
+ * "turn your phone" screen covers the page and no frames are sent.
+ *
  * Frames are sent as binary websocket messages: a 4-byte header (width, height as
  * little-endian uint16) followed by the raw JPEG. Up to MAX_IN_FLIGHT frames are
  * outstanding; each ack frees a slot and the next frame is captured fresh at that
@@ -30,15 +34,18 @@ export function mountPhone(root: HTMLElement): () => void {
   injectStyles();
 
   root.innerHTML = `
-    <div class="dc-page dc-phone">
-      <h1>Deskcapade camera</h1>
-      <p>Point this at your desk. Keep this page open.</p>
-      <div class="dc-bar">
+    <div class="dcp">
+      <video id="video" autoplay muted playsinline></video>
+      <div class="dcp-top">
         <span class="dc-chip" id="conn"><span class="dc-dot"></span><span id="connText">Connecting…</span></span>
         <button class="dc-btn ghost" id="flip" type="button">Flip camera</button>
       </div>
-      <video id="video" autoplay muted playsinline></video>
-      <p id="error" class="dc-hidden" style="color: var(--dc-bad); margin-top: 12px;"></p>
+      <p id="error" class="dcp-error dc-hidden"></p>
+      <div class="dcp-rotate">
+        <div class="dcp-icon">📱</div>
+        <h2>Turn your phone sideways</h2>
+        <p>Deskcapade only streams in landscape, so the picture fits your laptop screen. Rotate your phone to start.</p>
+      </div>
     </div>
   `;
 
@@ -53,6 +60,10 @@ export function mountPhone(root: HTMLElement): () => void {
   let facing: "environment" | "user" = "environment";
   let stream: MediaStream | null = null;
   let stopped = false;
+
+  // orientation: frames are only sent in landscape
+  const landscapeQuery = window.matchMedia("(orientation: landscape)");
+  let landscape = landscapeQuery.matches;
 
   // flow control + adaptive quality
   let sentTimes: number[] = []; // send time of each un-acked frame, oldest first
@@ -69,7 +80,10 @@ export function mountPhone(root: HTMLElement): () => void {
     let text = "Connecting…";
     let cls = "dc-chip";
     if (socketState === "open") {
-      if (desktopConnected) {
+      if (!landscape) {
+        text = "Turn phone sideways";
+        cls = "dc-chip warn";
+      } else if (desktopConnected) {
         const cfg = LEVELS[level]!;
         const delay = rttEma > 0 ? ` · ${Math.round(rttEma)} ms` : "";
         text = `Streaming to laptop · ${cfg.width}px${delay}`;
@@ -85,6 +99,12 @@ export function mountPhone(root: HTMLElement): () => void {
     connText.textContent = text;
     connChip.className = cls;
   };
+
+  const onOrientationChange = (): void => {
+    landscape = landscapeQuery.matches;
+    renderStatus();
+  };
+  landscapeQuery.addEventListener("change", onOrientationChange);
 
   const onAck = (): void => {
     const sent = sentTimes.shift();
@@ -186,6 +206,7 @@ export function mountPhone(root: HTMLElement): () => void {
   const ctx = canvas.getContext("2d");
 
   const sendFrame = (): void => {
+    if (!landscape) return; // portrait: nothing is streamed
     if (!ctx || encoding || !socket.isOpen() || video.readyState < 2 || video.videoWidth === 0) {
       return;
     }
@@ -263,6 +284,7 @@ export function mountPhone(root: HTMLElement): () => void {
     stopped = true;
     window.clearTimeout(timer);
     window.clearInterval(watchdog);
+    landscapeQuery.removeEventListener("change", onOrientationChange);
     document.removeEventListener("visibilitychange", onVisible);
     void wakeLock?.release().catch(() => undefined);
     stream?.getTracks().forEach((t) => t.stop());
