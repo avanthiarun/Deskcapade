@@ -1,0 +1,18 @@
+# One-click hosting on Render (https://render.com): New > Blueprint > pick this repo.
+# Render gives the game a public https:// address (cameras need https) and supports the
+# phone's websocket. Set the two API keys in the Render dashboard; they never go in git.
+services:
+  - type: web
+    name: deskcapade
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: PERCEPTRON_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

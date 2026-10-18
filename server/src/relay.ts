@@ -39,8 +39,13 @@ function toBuffer(data: RawData): Buffer {
   return Buffer.from(data);
 }
 
+/** Room codes come from the client (random per laptop tab); anything else shares the "local" room. */
+const ROOM_RE = /^[a-z0-9]{6,32}$/;
+
 /**
- * One room: any number of phones (camera) and desktops (viewer).
+ * Rooms: each laptop tab and the phone that scanned its QR code share a private room, so many
+ * people can play from one hosted server without seeing each other's desks. A room holds any
+ * number of phones (camera) and desktops (viewer), and is dropped when the last one leaves.
  *
  * Frame wire format (phone -> server -> desktop), a binary websocket message:
  *   bytes 0-1: width  (uint16, little-endian)
@@ -52,7 +57,53 @@ function toBuffer(data: RawData): Buffer {
  */
 export function attachRelay(server: HttpServer): void {
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD_BYTES });
+  const rooms = new Map<string, Room>();
 
+  wss.on("connection", (rawWs, req) => {
+    const ws = rawWs as AliveSocket;
+    const url = new URL(req.url ?? "/ws", "http://localhost");
+    const code = (url.searchParams.get("room") ?? "").toLowerCase();
+    const id = ROOM_RE.test(code) ? code : "local";
+    let room = rooms.get(id);
+    if (!room) {
+      const fresh: Room = createRoom(() => {
+        if (rooms.get(id) === fresh) rooms.delete(id);
+      });
+      rooms.set(id, fresh);
+      room = fresh;
+    }
+    room.join(ws, url);
+  });
+
+  // ---------- upgrade + heartbeat ----------
+
+  server.on("upgrade", (req, socket, head) => {
+    const { pathname } = new URL(req.url ?? "/", "http://localhost");
+    if (pathname !== "/ws") {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  });
+
+  // Drop sockets that stopped answering (phone slept, wifi dropped).
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients as Set<AliveSocket>) {
+      if (ws.isAlive === false) {
+        ws.terminate();
+        continue;
+      }
+      ws.isAlive = false;
+      ws.ping();
+    }
+  }, HEARTBEAT_MS);
+  wss.on("close", () => clearInterval(heartbeat));
+}
+
+type Room = { join: (ws: AliveSocket, url: URL) => void };
+
+/** One room's phones, desktops and scanning. `onEmpty` runs when everyone has left. */
+function createRoom(onEmpty: () => void): Room {
   const phones = new Set<AliveSocket>();
   const desktops = new Set<AliveSocket>();
   // Desktops that want automatic scanning (the live-video pages). The Challenge page connects with scan=0.
@@ -172,9 +223,14 @@ export function attachRelay(server: HttpServer): void {
 
   // ---------- connections ----------
 
-  wss.on("connection", (rawWs, req) => {
-    const ws = rawWs as AliveSocket;
-    const url = new URL(req.url ?? "/ws", "http://localhost");
+  const leftEmpty = (): void => {
+    if (phones.size === 0 && desktops.size === 0) {
+      stopScanLoop();
+      onEmpty();
+    }
+  };
+
+  function join(ws: AliveSocket, url: URL): void {
     const role = url.searchParams.get("role");
 
     ws.isAlive = true;
@@ -229,6 +285,7 @@ export function attachRelay(server: HttpServer): void {
         }
         syncScanLoop();
         broadcastStatus();
+        leftEmpty();
       });
     } else if (role === "desktop") {
       desktops.add(ws);
@@ -253,9 +310,11 @@ export function attachRelay(server: HttpServer): void {
         if (scanners.size === 0) frozen = false;
         syncScanLoop(); // stops scanning when nobody is watching
         broadcastStatus();
+        leftEmpty();
       });
     } else {
       ws.close(1008, "role must be phone or desktop");
+      leftEmpty();
       return;
     }
 
@@ -264,29 +323,7 @@ export function attachRelay(server: HttpServer): void {
     });
     syncScanLoop();
     broadcastStatus();
-  });
+  }
 
-  // ---------- upgrade + heartbeat ----------
-
-  server.on("upgrade", (req, socket, head) => {
-    const { pathname } = new URL(req.url ?? "/", "http://localhost");
-    if (pathname !== "/ws") {
-      socket.destroy();
-      return;
-    }
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
-  });
-
-  // Drop sockets that stopped answering (phone slept, wifi dropped).
-  const heartbeat = setInterval(() => {
-    for (const ws of wss.clients as Set<AliveSocket>) {
-      if (ws.isAlive === false) {
-        ws.terminate();
-        continue;
-      }
-      ws.isAlive = false;
-      ws.ping();
-    }
-  }, HEARTBEAT_MS);
-  wss.on("close", () => clearInterval(heartbeat));
+  return { join };
 }

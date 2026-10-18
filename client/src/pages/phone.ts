@@ -85,6 +85,7 @@ export function mountPhone(root: HTMLElement): () => void {
   const freezeBtn = root.querySelector<HTMLButtonElement>("#freeze")!;
   const freezeLabel = root.querySelector<HTMLElement>("#freezeLabel")!;
   let canFreeze = false;
+  const joinedByLink = new URLSearchParams(location.search).has("room");
   let frozen = false;
   const flash = root.querySelector<HTMLElement>("#flash")!;
   const style = document.createElement("style");
@@ -127,7 +128,8 @@ export function mountPhone(root: HTMLElement): () => void {
         text = `Streaming to laptop · ${cfg.width}px${delay}`;
         cls = "dc-chip on";
       } else {
-        text = "Waiting for laptop";
+        // opened without the QR code's room: this phone can't find its laptop
+        text = joinedByLink ? "Waiting for laptop" : "Scan the QR code on your laptop";
         cls = "dc-chip warn";
       }
     } else if (socketState === "closed") {

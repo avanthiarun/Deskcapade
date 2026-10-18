@@ -3,6 +3,7 @@ import type { ApiError, CharacterResponse, InfoResponse, ScanResponse, ServerToD
 import { addCustomCharacter, buddyRows, type Character } from "../game/art";
 import { colorsFromDominant, sampleDominantColor, type Rgb } from "./deskSprites";
 import { connectSocket } from "./socket";
+import { phoneLink } from "./room";
 
 /* ------------------------------------------------------------------
    "Make a character from a photo": snap your stuffed pig (laptop or phone camera), Perceptron
@@ -155,8 +156,8 @@ export function openPhotoCharacter(host: HTMLElement, onMade: (c: Character) => 
         const opened = location.hostname !== "localhost" && location.hostname !== "127.0.0.1";
         const base = opened ? location.origin : (info.tunnelUrl ?? info.lanUrls[0] ?? "");
         if (!base) return;
-        qr.querySelector(".gm-url")!.textContent = `${base}/phone`;
-        qr.querySelector("img")!.src = await QRCode.toDataURL(`${base}/phone`, { margin: 1, width: 320 });
+        qr.querySelector(".gm-url")!.textContent = phoneLink(base);
+        qr.querySelector("img")!.src = await QRCode.toDataURL(phoneLink(base), { margin: 1, width: 320 });
       } catch {
         qr.querySelector(".gm-url")!.textContent = "Can't read this laptop's address. Is the game server running?";
       }

@@ -59,6 +59,14 @@ app.get("/api/info", (_req, res) => {
   res.json(body);
 });
 
+// Hosted (one server for everything): serve the built game, and send every page address
+// (/story, /phone?room=...) to it. In development Vite serves the game instead.
+const clientDist = path.join(rootDir, "client", "dist");
+if (fs.existsSync(path.join(clientDist, "index.html"))) {
+  app.use(express.static(clientDist, { index: false }));
+  app.get(/^\/(?!api\/|ws$).*/, (_req, res) => res.sendFile(path.join(clientDist, "index.html")));
+}
+
 const server = app.listen(config.port, () => {
   logStartupMode();
   console.log(`[deskcapade] API listening on http://localhost:${config.port}`);

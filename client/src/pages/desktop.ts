@@ -6,6 +6,7 @@ import { matchInBackground, onMatched } from "../lib/matchObjects";
 import { injectGameStyles } from "../lib/gameStyles";
 import { connectSocket } from "../lib/socket";
 import { bindStoryUi, storyLayoutHTML } from "./storyLayout";
+import { phoneLink } from "../lib/room";
 
 const STALE_FRAME_MS = 2000;
 const FRAME_HEADER_BYTES = 4; // width + height (uint16 each), then the JPEG
@@ -164,7 +165,7 @@ export function mountDesktop(root: HTMLElement): () => void {
   // ---------- QR code: the address the phone should open ----------
 
   const showUrl = async (base: string): Promise<void> => {
-    const url = `${base}/phone`;
+    const url = phoneLink(base);
     if (url === shownUrl) return;
     shownUrl = url;
     phoneUrlEl.textContent = url;

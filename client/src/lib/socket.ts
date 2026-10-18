@@ -1,3 +1,5 @@
+import { roomId } from "./room";
+
 export type SocketState = "connecting" | "open" | "closed";
 
 export type SocketHandle = {
@@ -35,7 +37,7 @@ export function connectSocket(
     if (stopped) return;
     handlers.onState("connecting");
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(`${proto}//${location.host}/ws?role=${role}${opts.scan === false ? "&scan=0" : ""}`);
+    ws = new WebSocket(`${proto}//${location.host}/ws?role=${role}&room=${roomId()}${opts.scan === false ? "&scan=0" : ""}`);
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {

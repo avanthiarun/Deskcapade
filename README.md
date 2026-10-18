@@ -62,6 +62,20 @@ ngrok http https://localhost:5173
 
 Open the printed `https://…` URL on the phone, then go to `/capture`. The browser talks to the tunnel; Vite still proxies `/api` locally.
 
+## Play it online (hosting)
+
+Anyone with the link gets their own private game: every laptop tab has its own room, and
+its QR code connects only that person's phone.
+
+1. Push this repo to GitHub.
+2. On [Render](https://render.com): **New > Blueprint**, pick the repo. It reads `render.yaml`.
+3. When asked, paste `PERCEPTRON_API_KEY` and `GEMINI_API_KEY` (stored by Render, never in git).
+4. Share the `https://….onrender.com` address it gives you.
+
+Any Node host works the same way: `npm ci --include=dev && npm run build`, then `npm start`
+(serves the game, the API and the phone websocket on `PORT`). The host must provide https,
+since browsers only allow the camera on https pages. Everyone shares your API keys' quota.
+
 ## Scripts
 
 | Command | What it does |

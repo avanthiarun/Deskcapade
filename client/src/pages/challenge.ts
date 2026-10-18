@@ -21,6 +21,7 @@ import { ROUTES } from "../lib/routes";
 import { addPoints, bindAbout, formatTime, getPoints, paintArt, pauseOverlay, sceneryHTML } from "../lib/shell";
 import { bindSoundToggle, music, sfx } from "../lib/sound";
 import { connectSocket } from "../lib/socket";
+import { phoneLink } from "../lib/room";
 
 const SNAP_WIDTH = 800; // the photo is scaled down to this width before it is sent
 const SNAP_JPEG_QUALITY = 0.8;
@@ -377,7 +378,7 @@ export function mountChallenge(root: HTMLElement): () => void {
   };
 
   const showPhoneUrl = async (base: string): Promise<void> => {
-    const url = `${base}/phone`;
+    const url = phoneLink(base);
     if (url === shownUrl) return;
     shownUrl = url;
     phoneUrlEl.textContent = url;
